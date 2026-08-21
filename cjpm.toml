@@ -13,6 +13,10 @@ package-configuration = {}
 
 [dependencies]
 
+[target.x86_64-unknown-linux-gnu]
+  [target.x86_64-unknown-linux-gnu.bin-dependencies]
+    path-option = ["${CANGJIE_STDX_PATH}"]
+
 [profile.bench]
 no-color = true
 verbose = true
