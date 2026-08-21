@@ -1,0 +1,22 @@
+[package]
+cjc-version = "1.1.0"
+name = "sse4cj"
+organization = ""
+description = "Production-oriented Server-Sent Events (SSE) library for Cangjie"
+version = "0.1.0"
+target-dir = ""
+output-type = "static"
+compile-option = "-O2"
+override-compile-option = ""
+link-option = ""
+package-configuration = {}
+
+[dependencies]
+
+[profile.bench]
+no-color = true
+verbose = true
+
+[profile.bench.build]
+compile-option = "-O2"
+link-option = ""
