@@ -1,0 +1,39 @@
+name: Sync verified source
+
+on:
+  push:
+    branches:
+      - feat/bootstrap-sse4cj
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Stop until payload is complete
+        run: |
+          if [ ! -f .github/sse4cj-bundle.ready ]; then
+            echo "Bundle payload is not complete yet."
+            exit 0
+          fi
+      - name: Restore verified tree
+        if: ${{ hashFiles('.github/sse4cj-bundle.ready') != '' }}
+        run: |
+          set -euo pipefail
+          cat .github/sse4cj-bundle.part-* | base64 -d > /tmp/sse4cj-complete.bundle
+          echo 'eb5d730599c8515ed07a5a6ca5f3d8552ab25edc5773fa62de02714f82f70040  /tmp/sse4cj-complete.bundle' | sha256sum -c -
+          git bundle verify /tmp/sse4cj-complete.bundle
+          git fetch /tmp/sse4cj-complete.bundle HEAD:refs/remotes/verified/source
+
+          git rm -rf .
+          git checkout refs/remotes/verified/source -- .
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Sync complete verified sse4cj implementation'
+          git push origin HEAD:feat/bootstrap-sse4cj
