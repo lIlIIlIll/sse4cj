@@ -13,6 +13,11 @@ public class EncodedSseFrame {
         }
     }
 
+    // Zero-copy access for the writer loop. The returned array must not be mutated.
+    public func sharedBytes(): Array<Byte> {
+        encoded
+    }
+
     public func toBytes(): Array<Byte> {
         encoded.clone()
     }

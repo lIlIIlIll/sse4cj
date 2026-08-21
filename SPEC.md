@@ -931,6 +931,43 @@ SseConnection
 
 ```
 
+### 0. 传输层约束（stdx HTTP 限制）
+
+经源码验证（stdx `HttpResponseWriter`、`HttpContext`、`HttpEngineConn1`、`HttpEngineConn2`）：
+
+```text
+HttpResponseWriter 仅有 write(buf) 一个公开数据 API。
+无 close/abort/interrupt/flush/end。
+write() 在 synchronized(writerMtx) 中同步阻塞直到底层 socket 写完成。
+HttpContext 公开面不含 writerMtx、responded、upgraded 等内部状态。
+HttpEngineConn 是 abstract class（非 public），HttpEngineConn1/2 是 class（非 public）。
+外部包无法获取底层 socket 句柄或触发连接关闭。
+```
+
+writeTimeout 行为（stdx bug，非设计意图）：
+
+```text
+HTTP/1.1 writeResponseByWriter:
+    首次 flush header 时启动 writeTimer（一次性）。
+    后续每次 write() 不重置、不取消、不重启 writeTimer。
+    writeTimer 到期后 close()，无论连接是否健康。
+    → 会误杀活跃 SSE 长连接。
+
+HTTP/2 writeResponseByWriter:
+    无 writeTimer。
+    → 完全无写超时兜底。
+```
+
+设计约束：
+
+- 不得依赖 writeTimeout 作为慢消费者触发器（会误杀健康连接，HTTP/2 无覆盖）。
+- 慢消费者检测和断连决策必须在 write 返回前（enqueue 阶段）完成。
+- writer task 阻塞在 write() 中时，Hub 侧标记 dead connection 并停止 enqueue。
+- writer task 的协程释放依赖底层 socket 断开（客户端断连或引擎超时），sse4cj 无法主动 kill 协程。
+- 必须限制最大并发连接数，防止慢消费者攻击下协程累积。
+- 文档必须声明上述限制为已知 stdx 约束，而非 sse4cj 设计缺陷。
+- 如果未来 stdx 提供公开的 per-connection abort/close API，应立即采用并移除此限制声明。
+
 ### 1. 所有权模型
 
 禁止使用静态全局注册表。
@@ -1024,6 +1061,10 @@ X-Accel-Buffering: no
 - 显式 flush；
 - 首个 comment；
 - 特定 streaming API。
+- stdx `HttpResponseWriter` 无公开 flush API；
+- stdx `HttpResponseWriter` 无公开 close/abort API；
+- 首次 write 自动触发 header flush（chunked 或 content-length 由 stdx 检查）；
+- 后续 write 逐次写入 body，无显式 flush。
 
 通过实际 loopback 测试证明事件会立即逐条发送，而不是响应结束后一次性输出。
 
@@ -1048,11 +1089,19 @@ Writer 负责：
 顺序写出
 flush
 heartbeat
-write error
-cancel
-close
+write error 处理（write 抛异常后 deregister）
+close（response writer 无公开 close，由底层 socket 断开或引擎 writeTimeout 完成）
 finally deregister
 
+```
+
+Writer 不可中断性（见 §0 传输层约束）：
+
+```text
+stdx HttpResponseWriter.write 不可从外部中断。
+一旦 writer task 进入 write 调用，只能等待其完成或抛异常。
+Hub 侧通过队列背压在 write 之前决策，不依赖中断进行中的 write。
+writer task write 异常后从 Hub deregister 并退出循环。
 ```
 
 ### 5. 有界队列
@@ -1089,6 +1138,12 @@ DisconnectSlowConsumer
 
 ```
 
+所有背压决策在 enqueue 阶段执行，不在 write 阶段执行。
+
+原因：stdx `HttpResponseWriter.write` 不可中断（见 §0 传输层约束）。
+一旦帧进入 write 调用，无法从外部取消该调用。
+因此慢消费者检测必须在帧入队前完成。
+
 广播路径必须非阻塞或有明确超时。
 
 一个慢客户端队列满时，不得阻塞其他客户端。
@@ -1102,6 +1157,26 @@ disconnected
 closed
 failed
 
+```
+
+writer task 阻塞时的处理：
+
+```text
+writer task 阻塞在 write() 中
+→ Hub 侧队列积满
+→ 后续 send 返回 Disconnected 或 Failed
+→ Hub 从 fan-out 列表移除该 connection
+→ 其他 connection 不受影响
+→ writer task 协程在底层 socket 断开后自然退出
+```
+
+协程泄漏防护：
+
+```text
+最大并发连接数可配置。
+达到上限时拒绝新连接（503）。
+定期扫描 dead connection（队列长时间未消费）。
+dead connection 标记后停止 enqueue。
 ```
 
 ### 7. 广播性能
@@ -1173,15 +1248,26 @@ closeGracefully(deadline)
 停止接收新连接
 → endpoint 标记 closing
 → 可选 drain 队列
-→ deadline 到达后取消
-→ 关闭 response
+→ deadline 到达后标记全部 connection 为 dead
+→ 停止向所有 connection enqueue
+→ 关闭 HTTP server（触发底层 socket 断开）
+→ writer task 在 socket 断开后 write 抛异常退出
 → deregister
 → 清空 registry
-→ 关闭 HTTP server
-
 ```
 
 关闭必须幂等。
+
+stdx 限制（见 §0 传输层约束）：
+
+```text
+closeNow 无法主动中断正在 write 的 writer task。
+closeNow 做的是：停止 enqueue + 关闭 HTTP server。
+底层 socket 断开后 write 抛异常，writer task 才能退出。
+如果 writer task 阻塞在 write 中且 socket 未断（TCP 窗口为零但连接活跃），
+writer task 协程会挂起直到 TCP 超时或客户端断连。
+这是 stdx 的限制，不是 sse4cj 的设计选择。
+```
 
 ---
 
@@ -1849,6 +1935,10 @@ cjcov
 34. 有真实 benchmark 数据。
 35. 文档完整。
 36. 没有将未验证能力声称为已支持。
+37. stdx writeTimeout 限制已在文档中声明（见 §0 传输层约束）。
+38. 背压决策在 enqueue 阶段完成，不依赖中断进行中的 write。
+39. 最大并发连接数可配置，防止协程累积。
+40. writer task 阻塞时 Hub 侧正确标记 dead connection 并从 fan-out 移除。
 
 如果由于当前 stdx API 限制无法完成某项：
 
@@ -1931,6 +2021,9 @@ cjcov
 - cancellation
 - slow consumer
 - memory bounds
+- stdx writeTimeout 限制（不可靠的慢消费者触发器，误杀健康连接）
+- writer task 不可中断性（enqueue 阶段背压，无法中断进行中的 write）
+- 最大并发连接数限制
 
 ## H. Security
 - injection
@@ -1943,6 +2036,11 @@ cjcov
 - 每个文件及作用
 
 ## J. Remaining Limitations
+- stdx `HttpResponseWriter` 无公开 close/abort/interrupt API
+- writer task 阻塞在 write 中时无法主动 kill 协程
+- writeTimeout 是 stdx bug（一次性定时器，不重置），不可作为可靠触发器
+- HTTP/2 路径无 writeTimer 兜底
+- 协程释放依赖底层 socket 断开
 - 只写真实限制
 
 ## K. Verification

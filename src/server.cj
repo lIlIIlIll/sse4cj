@@ -146,12 +146,13 @@ private class StdxSseConnectionWriter <: SseConnectionWriter {
     }
 
     public func write(frame: EncodedSseFrame): Unit {
+        // stdx HttpResponseWriter.write is synchronous and non-interruptible.
+        // This call blocks until the socket write completes or throws.
         responseWriter.write(frame.sharedBytes())
     }
 
     public func flush(): Unit {}
     public func close(): Unit {}
-    public func interrupt(): Unit {}
 }
 
 public class SseServerConfig {
@@ -160,22 +161,28 @@ public class SseServerConfig {
     public let readTimeoutMillis: Int64
     public let writeTimeoutMillis: Int64
     public let readHeaderTimeoutMillis: Int64
+    public let maxConnections: Int64
 
     public init(
         address!: String = "127.0.0.1",
         port!: UInt16 = 0,
         readTimeoutMillis!: Int64 = 120_000,
         writeTimeoutMillis!: Int64 = 30_000,
-        readHeaderTimeoutMillis!: Int64 = 10_000
+        readHeaderTimeoutMillis!: Int64 = 10_000,
+        maxConnections!: Int64 = 1024
     ) {
         if (address.size == 0 || readTimeoutMillis <= 0 || writeTimeoutMillis <= 0 || readHeaderTimeoutMillis <= 0) {
             throw SseException(SseErrorKind.InvalidConfiguration, "server address/timeouts must be finite and valid")
+        }
+        if (maxConnections <= 0) {
+            throw SseException(SseErrorKind.InvalidConfiguration, "maxConnections must be positive")
         }
         this.address = address
         this.port = port
         this.readTimeoutMillis = readTimeoutMillis
         this.writeTimeoutMillis = writeTimeoutMillis
         this.readHeaderTimeoutMillis = readHeaderTimeoutMillis
+        this.maxConnections = maxConnections
     }
 }
 
@@ -187,6 +194,7 @@ public class SseServer {
     private let started = AtomicBool(false)
     private let closing = AtomicBool(false)
     private let nextConnectionId = AtomicInt64(1)
+    private let activeConnectionCount = AtomicInt64(0)
     private var server: Option<Server> = None<Server>
     private var worker: Option<Future<Unit>> = None<Future<Unit>>
     private var bound = false
@@ -265,8 +273,16 @@ public class SseServer {
         let request = SseServerRequest(ctx.request.method, ctx.request.remoteAddr.toString(), lastId, {name => headers.getFirst(name)})
         let decision = try { endpoint.decide(request) } catch (_: Exception) { ctx.responseBuilder.status(500).body(""); return }
         if (!decision.accepted) { ctx.responseBuilder.status(decision.rejectStatus).body(""); return }
+        // Enforce max connections to prevent coroutine accumulation under slow-consumer attacks.
+        // stdx HttpResponseWriter.write is non-interruptible; without a connection limit,
+        // blocked writer coroutines would accumulate unboundedly.
+        if (activeConnectionCount.fetchAdd(1) >= config.maxConnections) {
+            activeConnectionCount.fetchSub(1)
+            ctx.responseBuilder.status(503).body("")
+            return
+        }
         ctx.responseBuilder.status(200).header("Content-Type", "text/event-stream; charset=utf-8")
-            .header("Cache-Control", "no-cache, no-transform").header("Transfer-Encoding", "chunked")
+            .header("Cache-Control", "no-cache, no-transform")
         if (endpoint.config.xAccelBufferingNo) { ctx.responseBuilder.header("X-Accel-Buffering", "no") }
         let responseWriter = StdxSseConnectionWriter(ctx)
         let connection = SseConnection("sse-" + nextConnectionId.fetchAdd(1).toString(), config: endpoint.config.connection)
@@ -277,6 +293,8 @@ public class SseServer {
         } catch (error: Exception) {
             connection.closeNow()
             throw error
+        } finally {
+            activeConnectionCount.fetchSub(1)
         }
     }
 
