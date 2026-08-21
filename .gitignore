@@ -1,0 +1,6 @@
+target/
+.cjpm/
+*.log
+benchmark/results/*.json
+benchmark/results/*.csv
+.DS_Store
