@@ -35,9 +35,23 @@ public class SseDecoder {
     }
 
     public func feed(bytes: Array<Byte>, sink: SseDecodeSink): Unit {
+        feed(bytes, 0, bytes.size, sink)
+    }
+
+    public func feed(bytes: Array<Byte>, start: Int64, count: Int64, sink: SseDecodeSink): Unit {
         ensureUsable()
-        for (byte in bytes) {
-            feedInitialByte(byte, sink)
+        if (start < 0 || count < 0 || start > bytes.size || count > bytes.size - start) {
+            throw SseException(
+                SseErrorKind.InvalidConfiguration,
+                "SSE decoder feed range must be within the input byte array"
+            )
+        }
+
+        let end = start + count
+        var index = start
+        while (index < end) {
+            feedInitialByte(bytes[index], sink)
+            index++
         }
     }
 

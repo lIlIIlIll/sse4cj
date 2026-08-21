@@ -174,6 +174,44 @@ func decoderChunkSizeInvariant() {
 }
 
 @Test
+func decoderRangeFeedConsumesOnlyRequestedBytes() {
+    let sink = CollectingSink()
+    let decoder = SseDecoder()
+    let bytes = utf8("ignoredata: ok\n\nignore")
+    decoder.feed(bytes, 6, 10, sink)
+    decoder.finish(sink)
+
+    @Assert(sink.events.size, 1)
+    @Assert(sink.events[0].data, "ok")
+}
+
+private func assertInvalidDecoderFeedRange(bytes: Array<Byte>, start: Int64, count: Int64): Unit {
+    let decoder = SseDecoder()
+    let sink = CollectingSink()
+    var caught = false
+    try {
+        decoder.feed(bytes, start, count, sink)
+    } catch (e: SseException) {
+        caught = match (e.kind) {
+            case SseErrorKind.InvalidConfiguration => true
+            case _ => false
+        }
+    }
+    @Assert(caught)
+}
+
+@Test
+func decoderRangeFeedRejectsInvalidBoundsWithoutOverflow() {
+    let bytes: Array<Byte> = [b'a', b'b', b'c']
+    assertInvalidDecoderFeedRange(bytes, -1, 1)
+    assertInvalidDecoderFeedRange(bytes, 0, -1)
+    assertInvalidDecoderFeedRange(bytes, 4, 0)
+    assertInvalidDecoderFeedRange(bytes, 2, 2)
+    assertInvalidDecoderFeedRange(bytes, Int64.Max, 1)
+    assertInvalidDecoderFeedRange(bytes, 1, Int64.Max)
+}
+
+@Test
 func decoderLineLimitFailsAndResetRecovers() {
     let limits = SseDecoderLimits(
         maxLineBytes: 4,
