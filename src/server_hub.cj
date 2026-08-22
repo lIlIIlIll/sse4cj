@@ -24,6 +24,10 @@ public class SseHub {
 
     public init(replay!: Option<ReplayProvider> = None<ReplayProvider>) { this.replay = replay }
 
+    /// Attach is serialized with replay-aware logical broadcasts. This creates a
+    /// total ordering: a frame is either already in replay before attach, or it is
+    /// delivered live after the connection has been registered. It cannot be lost
+    /// in the replay/live handoff window.
     func attach(connection: SseConnection, lastEventId!: String = "", gapPolicy!: ReplayGapPolicy = ReplayGapPolicy.StartLive): Unit {
         connection.setHub(this)
         synchronized(mutex) {
@@ -43,7 +47,41 @@ public class SseHub {
 
     func removeConnection(id: String): Unit { synchronized(mutex) { connections.remove(id) } }
     public prop connectionCount: Int64 { get() { synchronized(mutex) { connections.size } } }
+
+    /// Preferred replay-aware broadcast path. The logical frame is encoded once,
+    /// recorded by id when present, and the same immutable bytes are enqueued to
+    /// every current connection.
+    public func broadcast(frame: SseFrame): SseBroadcastStats {
+        let encoded = SseEncoder.encode(frame)
+        let id = match (frame.id) { case Some(value) => value; case None => "" }
+        let targets = synchronized(mutex) {
+            match (replay) {
+                case Some(provider) => provider.store(encoded, id)
+                case None => ()
+            }
+            snapshotLocked()
+        }
+        deliver(encoded, targets)
+    }
+
+    /// Compatibility/high-performance path for callers that already own encoded
+    /// bytes. Because EncodedSseFrame intentionally does not expose parsed fields,
+    /// this overload cannot infer an event id and therefore does not add replay
+    /// history. Use broadcast(SseFrame) when replay must be retained.
     public func broadcast(frame: EncodedSseFrame): SseBroadcastStats { deliver(frame, snapshot()) }
+
+    /// Encoded replay-aware path for callers that already encoded a logical event
+    /// and can provide its id without reparsing the wire bytes.
+    public func broadcastEncoded(frame: EncodedSseFrame, id: String): SseBroadcastStats {
+        let targets = synchronized(mutex) {
+            match (replay) {
+                case Some(provider) => provider.store(frame, id)
+                case None => ()
+            }
+            snapshotLocked()
+        }
+        deliver(frame, targets)
+    }
 
     public func sendWhere(frame: EncodedSseFrame, predicate: (SseConnection) -> Bool): SseBroadcastStats {
         let selected = ArrayList<SseConnection>()
@@ -76,12 +114,12 @@ public class SseHub {
         }
     }
 
-    private func snapshot(): Array<SseConnection> {
-        synchronized(mutex) {
-            let result = ArrayList<SseConnection>()
-            for (connection in connections.values()) { result.add(connection) }
-            result.toArray()
-        }
+    private func snapshot(): Array<SseConnection> { synchronized(mutex) { snapshotLocked() } }
+
+    private func snapshotLocked(): Array<SseConnection> {
+        let result = ArrayList<SseConnection>()
+        for (connection in connections.values()) { result.add(connection) }
+        result.toArray()
     }
 
     private func deliver(frame: EncodedSseFrame, targets: Array<SseConnection>): SseBroadcastStats {
