@@ -159,6 +159,9 @@ public class SseServerConfig {
     public let address: String
     public let port: UInt16
     public let readTimeoutMillis: Int64
+    // Retained for source compatibility. It is intentionally not forwarded to
+    // stdx ServerBuilder.writeTimeout for streaming SSE responses; see
+    // doc/transport-close-contract.md.
     public let writeTimeoutMillis: Int64
     public let readHeaderTimeoutMillis: Int64
     public let maxConnections: Int64
@@ -204,6 +207,13 @@ public class SseServer {
 
     public func register(endpoint: SseEndpoint): Unit {
         if (started.load()) { throw SseException(SseErrorKind.InvalidConfiguration, "register endpoints before server start") }
+        match (endpoint.config.connection.transportAbortCapability) {
+            case SseTransportAbortCapability.ServerWideOnly => ()
+            case _ => throw SseException(
+                SseErrorKind.InvalidConfiguration,
+                "stdx SseServer requires transportAbortCapability=ServerWideOnly"
+            )
+        }
         synchronized(mutex) {
             if (endpoints.contains(endpoint.path)) { throw SseException(SseErrorKind.InvalidConfiguration, "duplicate SSE endpoint path") }
             endpoints[endpoint.path] = endpoint
@@ -219,9 +229,13 @@ public class SseServer {
 
     public func start(): Unit {
         if (!started.compareAndSwap(false, true)) { throw SseException(SseErrorKind.InvalidConfiguration, "server already started") }
+        // Do not enable stdx ServerBuilder.writeTimeout for SSE responses.
+        // Current stdx HTTP/1.1 treats it as a response-lifetime timer, so an
+        // actively streaming SSE response is still disconnected when the timer
+        // expires. Slow-consumer handling therefore relies on bounded buffers
+        // and logical eviction; in-flight transport teardown is ServerWideOnly.
         let built = ServerBuilder().addr(config.address).port(config.port)
             .readTimeout(Duration.millisecond * config.readTimeoutMillis)
-            .writeTimeout(Duration.millisecond * config.writeTimeoutMillis)
             .readHeaderTimeout(Duration.millisecond * config.readHeaderTimeoutMillis)
             .afterBind({ => synchronized(mutex) { bound = true; bindCondition.notifyAll() } }).build()
         let snapshot = snapshotEndpoints()
@@ -283,6 +297,15 @@ public class SseServer {
         }
         ctx.responseBuilder.status(200).header("Content-Type", "text/event-stream; charset=utf-8")
             .header("Cache-Control", "no-cache, no-transform")
+        // Current stdx has no public unknown-length/chunked streaming switch.
+        // HttpResponseWriter works for HTTP/1.1 streaming only when chunked
+        // transfer coding is declared. Keep this workaround inside the stdx
+        // adapter and never emit it for HTTP/2, where Transfer-Encoding is invalid.
+        match (ctx.request.version) {
+            case Protocol.HTTP1_1 => ctx.responseBuilder.header("Transfer-Encoding", "chunked")
+            case Protocol.HTTP2_0 => ()
+            case _ => ()
+        }
         if (endpoint.config.xAccelBufferingNo) { ctx.responseBuilder.header("X-Accel-Buffering", "no") }
         let responseWriter = StdxSseConnectionWriter(ctx)
         let connection = SseConnection("sse-" + nextConnectionId.fetchAdd(1).toString(), config: endpoint.config.connection)
