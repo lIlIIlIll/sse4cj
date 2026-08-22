@@ -4,24 +4,46 @@ A greenfield, production-oriented Server-Sent Events (SSE) library for Cangjie.
 
 ## Status
 
-Repository bootstrap only. The SSE implementation itself has **not** been claimed complete or SDK-verified yet.
+Implementation is in progress and is compiled against the active Cangjie/stdx toolchain. The repository does **not** claim `COMPLETE` until every completion gate in [`SPEC.md`](SPEC.md) is satisfied.
 
 The project is intentionally independent from `eventsource4cj`: no compatibility layer, copied implementation, inherited type design, or inherited error semantics are permitted.
 
 The normative implementation requirements are in [`SPEC.md`](SPEC.md). Agent/Codex execution rules are in [`AGENTS.md`](AGENTS.md).
 
-## Target capabilities
+## Core separation
 
-The completed library will keep four concerns separate:
+The library keeps these concerns distinct:
 
 1. `SseDecoder` / `SseEncoder` — incremental SSE wire codec.
 2. `SseStreamReader` — one finite HTTP SSE response; EOF is normal completion and never reconnects.
-3. `EventSourceClient` — long-lived EventSource semantics with Last-Event-ID, retry, reconnect, HTTP 204 stop and cancellation.
-4. `SseServer` / `SseHub` — server connections, single-writer fan-out, heartbeat, bounded backpressure, replay and shutdown.
+3. EventSource client semantics — long-lived reconnecting SSE with Last-Event-ID/retry/cancellation.
+4. `SseServer` / `SseHub` / `SseConnection` — server ownership, single-writer delivery, bounded backpressure, heartbeat, replay and shutdown.
 
-## Local implementation prerequisite
+## Connection close semantics
 
-Before writing SDK-dependent code, run in the real development environment:
+Server connections use a capability-aware two-phase close model:
+
+```text
+logical close
+    -> immediate Hub eviction
+    -> reject future enqueue
+    -> drop pending queue
+    -> do not start another write
+
+transport close
+    -> current in-flight write has actually returned/failed
+    -> writer response lifecycle is finished
+```
+
+Frame and byte limits include both queued and in-flight application frames. A blocked write therefore does not silently free the queue budget for another full payload behind it.
+
+The current stdx HTTP server adapter does not expose a public per-response abort primitive. It is treated as `ServerWideOnly`: logical eviction is immediate, while a write already in progress may only physically terminate when the write returns/fails, the peer disconnects, or the owning server is closed.
+
+See [`doc/transport-close-contract.md`](doc/transport-close-contract.md) for the precise contract and capability rules.
+
+## Local development prerequisite
+
+Use the real installed SDK/stdx environment:
 
 ```bash
 pwd
@@ -32,35 +54,7 @@ echo "$CANGJIE_HOME"
 echo "$CANGJIE_STDX_PATH"
 ```
 
-Then inspect the installed Cangjie SDK/stdx source and compile minimal probes for the actual HTTP client/server streaming API, flush behavior, response-body ownership, socket/cancellation primitives, Future/spawn, synchronization, bounded queues, monotonic clock, Timer and UTF-8 facilities.
-
-Do not infer these APIs from an older SDK or another repository. If documentation and actual compilation differ, the current installed toolchain is authoritative.
-
-## Bootstrap layout
-
-```text
-sse4cj/
-├── cjpm.toml
-├── README.md
-├── SPEC.md
-├── AGENTS.md
-├── CHANGELOG.md
-├── src/
-│   └── package.cj
-├── test/
-│   └── README.md
-├── benchmark/
-│   └── README.md
-├── examples/
-│   └── README.md
-└── doc/
-    ├── design.md
-    ├── protocol-compliance.md
-    ├── performance.md
-    └── security.md
-```
-
-The physical Cangjie source layout may be adjusted after inspecting current package rules, but wire/client/server/observability responsibilities must stay separated.
+Compile probes and tests against the current toolchain rather than assuming APIs from an older SDK or another repository.
 
 ## Quality bar
 
