@@ -37,6 +37,8 @@ Open -> Draining -> LogicallyClosed -> TransportClosed
 
 The current stdx HTTP server path uses `ServerWideOnly`. Its `HttpResponseWriter` public surface does not expose a per-response abort/interrupt operation, so sse4cj must not claim immediate physical teardown of an already-blocked write.
 
+`SseServer.register()` rejects endpoint connection configs that claim another abort capability. This prevents a caller from configuring the stdx writer as `Immediate` when the adapter cannot provide that behavior.
+
 ## Resource accounting
 
 The configured frame/byte limits cover both queued and in-flight application frames:
@@ -54,7 +56,58 @@ This prevents a blocked writer from holding one unaccounted large frame while pr
 
 Slow-consumer policy is decided before starting a new write. With `DisconnectSlowConsumer`, exceeding the frame or byte budget logically evicts the connection immediately. Other healthy connections remain independent because Hub fan-out performs enqueue only and never network I/O.
 
-An in-progress stdx write may continue after logical eviction. Its eventual physical termination depends on that write returning/failing, peer disconnect, or server-wide shutdown. `writeTimeout` is not treated as the semantic slow-consumer detector.
+An in-progress stdx write may continue after logical eviction. Its eventual physical termination depends on that write returning/failing, peer disconnect, or server-wide shutdown.
+
+## stdx write-timeout behavior
+
+The current uploaded stdx HTTP/1.1 server was verified with a real loopback connection. Enabling `ServerBuilder.writeTimeout(200 ms)` disconnected an otherwise healthy SSE stream at approximately the configured response age even though data was successfully transmitted every 50 ms. The runtime logged `write response timeout`.
+
+Therefore `SseServerConfig.writeTimeoutMillis` is retained for source compatibility but is **not forwarded** to `ServerBuilder.writeTimeout` for SSE streaming responses. It is not a slow-consumer detector and it is not a per-write inactivity deadline.
+
+Current slow-consumer protection instead comes from:
+
+- bounded queued + in-flight frame count;
+- bounded queued + in-flight bytes;
+- enqueue-stage backpressure policy;
+- logical Hub eviction;
+- `maxConnections` admission control;
+- server-wide shutdown as the stronger transport teardown boundary.
+
+## stdx HTTP/1.1 streaming framing limitation
+
+The current stdx public API does not expose an unknown-length/chunked streaming switch on `HttpResponseBuilder`.
+
+A compiled and executed probe using:
+
+```text
+HttpResponseBuilder.body(InputStream)
+```
+
+with an unknown-length body and no framing header returned HTTP 500 with:
+
+```text
+Unknown body size for Content-Length.
+```
+
+The same streaming body succeeds when HTTP/1.1 chunked transfer coding is declared. `HttpResponseWriter` has the same practical requirement for an indefinite HTTP/1.1 SSE response.
+
+For that reason the **stdx adapter only** applies the following compatibility workaround:
+
+- HTTP/1.1: declare `Transfer-Encoding: chunked` and let stdx perform the actual chunk encoding;
+- HTTP/2: never emit `Transfer-Encoding`;
+- generic SSE core code remains unaware of HTTP framing.
+
+This is an explicit current-SDK exception to the preferred transport-owned-framing rule in `SPEC.md`, not a claim that stdx exposes a proper framing API. Strict completion remains blocked until stdx can select indefinite streaming framing without the application declaring the HTTP/1.1 transfer coding.
+
+## Real loopback regressions
+
+The current adapter is covered by real 127.0.0.1 tests that verify:
+
+- an SSE event reaches the client before response close;
+- a client that does not read is logically evicted by buffered limits;
+- an actively streaming connection survives beyond a tiny configured `writeTimeoutMillis`, proving the unsafe stdx timer is not installed;
+- a slow-reading client is evicted by buffer pressure rather than the response-lifetime timer;
+- server-wide shutdown closes the remaining transport path.
 
 ## Immediate-capable custom transports
 
