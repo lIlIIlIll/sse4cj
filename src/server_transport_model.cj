@@ -1,5 +1,7 @@
 package sse4cj
 
+import std.deriving.Derive
+
 public enum SseTransportAbortCapability {
     Immediate | ServerWideOnly | Unsupported
 }
@@ -31,6 +33,7 @@ public enum SseBackpressureStrategy {
     DisconnectSlowConsumer | DropNewest | DropOldest | RejectSend | BlockWithTimeout
 }
 
+@Derive[Equatable]
 public enum SseSendStatus {
     Accepted | Rejected | Dropped | Disconnected | Closed | Failed
 }

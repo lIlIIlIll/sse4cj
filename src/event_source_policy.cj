@@ -1,8 +1,10 @@
 package sse4cj
 
+import std.deriving.Derive
 import std.random.Random
 import std.sync.*
 
+@Derive[Equatable]
 public enum EventSourceReadyState {
     CONNECTING | OPEN | CLOSED
 }
@@ -11,6 +13,7 @@ public enum SseCallbackExceptionPolicy {
     Continue | Close | ForwardToErrorHandler
 }
 
+@Derive[Equatable]
 public enum SseReconnectMode {
     Fixed | ExponentialBackoff
 }
@@ -80,7 +83,7 @@ public class SseReconnectPolicy {
     }
 
     private func exponentialBase(reconnectIndex: Int64): Int64 {
-        if (isFixedReconnectMode(mode) || reconnectIndex <= 0) {
+        if (mode == SseReconnectMode.Fixed || reconnectIndex <= 0) {
             return clampDelay(initialDelayMillis)
         }
         var value = initialDelayMillis
@@ -223,12 +226,5 @@ public class EventSourceConfig {
         this.decoderLimits = decoderLimits
         this.reconnectPolicy = reconnectPolicy
         this.callbackExceptionPolicy = callbackExceptionPolicy
-    }
-}
-
-private func isFixedReconnectMode(mode: SseReconnectMode): Bool {
-    match (mode) {
-        case SseReconnectMode.Fixed => true
-        case _ => false
     }
 }

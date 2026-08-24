@@ -326,29 +326,7 @@ private func assertDecodeLimitKind(input: String, limits: SseDecoderLimits, expe
     try {
         decoder.feed(diffUtf8(input), sink)
     } catch (e: SseException) {
-        matched = match (expectedKind) {
-            case SseErrorKind.LineTooLarge => match (e.kind) {
-                case SseErrorKind.LineTooLarge => true;
-                case _ => false
-            }
-            case SseErrorKind.FieldTooLarge => match (e.kind) {
-                case SseErrorKind.FieldTooLarge => true;
-                case _ => false
-            }
-            case SseErrorKind.DataTooLarge => match (e.kind) {
-                case SseErrorKind.DataTooLarge => true;
-                case _ => false
-            }
-            case SseErrorKind.EventTooLarge => match (e.kind) {
-                case SseErrorKind.EventTooLarge => true;
-                case _ => false
-            }
-            case SseErrorKind.BufferLimitExceeded => match (e.kind) {
-                case SseErrorKind.BufferLimitExceeded => true;
-                case _ => false
-            }
-            case _ => false
-        }
+        matched = e.kind == expectedKind
     }
     @Assert(matched)
 }

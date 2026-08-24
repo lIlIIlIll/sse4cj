@@ -26,7 +26,7 @@ private func replayThrowsGap(replay: MemoryReplayBuffer, id: String): Bool {
         replay.replay(id, ReplayGapPolicy.Reject)
         false
     } catch (e: SseException) {
-        isSseErrorKind(e.kind, SseErrorKind.ReplayGap)
+        e.kind == SseErrorKind.ReplayGap
     }
 }
 
@@ -126,7 +126,7 @@ func hubReplayGapPoliciesDoNotCreateGhostConnections() {
     try {
         hub.attach(SseConnection("reject-gap"), lastEventId: "missing", gapPolicy: ReplayGapPolicy.Reject)
     } catch (e: SseException) {
-        rejected = isSseErrorKind(e.kind, SseErrorKind.ReplayGap)
+        rejected = e.kind == SseErrorKind.ReplayGap
     }
     @Assert(rejected)
     @Assert(hub.connectionCount, 0)
@@ -164,7 +164,7 @@ func replayBatchMustFitConnectionBufferAtomically() {
     try {
         hub.attach(tooSmall, lastEventId: "1", gapPolicy: ReplayGapPolicy.Reject)
     } catch (e: SseException) {
-        slow = isSseErrorKind(e.kind, SseErrorKind.SlowConsumer)
+        slow = e.kind == SseErrorKind.SlowConsumer
     }
     @Assert(slow)
     @Assert(tooSmall.queuedFrameCount, 0)

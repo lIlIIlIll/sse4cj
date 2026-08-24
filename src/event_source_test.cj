@@ -179,7 +179,7 @@ private func requestHeader(request: SseHttpRequest, name: String): Option<String
 
 private func errorListContains(values: ArrayList<SseErrorKind>, expected: SseErrorKind): Bool {
     for (value in values) {
-        if (isSseErrorKind(value, expected)) {
+        if (value == expected) {
             return true
         }
     }
@@ -221,10 +221,7 @@ func eventSourceReconnectsOnEofCarriesIdAndStopsOn204() {
     @Assert(requestHeader(transport.requests[0], "Last-Event-ID"), None<String>)
     @Assert(requestHeader(transport.requests[1], "Last-Event-ID"), Some("42"))
     @Assert(callbacks.closedCount, 1)
-    @Assert(match (client.readyState) {
-        case EventSourceReadyState.CLOSED => true
-        case _ => false
-    })
+    @Assert(client.readyState == EventSourceReadyState.CLOSED)
 }
 
 @Test
@@ -395,10 +392,7 @@ func eventSourceCallbackClosePolicyClosesWithoutReconnect() {
     @Assert(transport.calls, 1)
     @Assert(response.closed)
     @Assert(callbacks.closedCount, 1)
-    @Assert(match (client.readyState) {
-        case EventSourceReadyState.CLOSED => true
-        case _ => false
-    })
+    @Assert(client.readyState == EventSourceReadyState.CLOSED)
 }
 
 @Test
@@ -415,8 +409,5 @@ func eventSourceCloseIsIdempotent() {
     client.close()
     client.close()
     @Assert(callbacks.closedCount, 1)
-    @Assert(match (client.readyState) {
-        case EventSourceReadyState.CLOSED => true
-        case _ => false
-    })
+    @Assert(client.readyState == EventSourceReadyState.CLOSED)
 }

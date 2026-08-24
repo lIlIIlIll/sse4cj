@@ -131,7 +131,7 @@ func eventSourceCloseInterruptsBlockingConnect() {
     @Assert(transport.awaitEntered())
     client.close()
     client.awaitClosed()
-    @Assert(match (client.readyState) { case EventSourceReadyState.CLOSED => true; case _ => false })
+    @Assert(client.readyState == EventSourceReadyState.CLOSED)
 }
 
 @Test

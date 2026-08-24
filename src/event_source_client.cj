@@ -203,10 +203,10 @@ public class EventSourceClient {
                 value.close()
             }
         } catch (error: SseException) {
-            if (closed.load() || isSseErrorKind(error.kind, SseErrorKind.Cancelled)) {
+            if (closed.load() || error.kind == SseErrorKind.Cancelled) {
                 return EventSourceAttemptOutcome.Stop
             }
-            if (isSseErrorKind(error.kind, SseErrorKind.TransportFailure)) {
+            if (error.kind == SseErrorKind.TransportFailure) {
                 invokeError(error)
                 return EventSourceAttemptOutcome.Reconnect(opened)
             }
@@ -392,74 +392,5 @@ private class EventSourceDecodeSink <: SseDecodeSink {
 
     public func onRetryChanged(retryMillis: Int64): Unit {
         client.decoderRetryChanged(retryMillis)
-    }
-}
-
-func isSseErrorKind(left: SseErrorKind, right: SseErrorKind): Bool {
-    match (left) {
-        case SseErrorKind.InvalidUtf8 => match (right) {
-            case SseErrorKind.InvalidUtf8 => true;
-            case _ => false
-        }
-        case SseErrorKind.InvalidOutboundField => match (right) {
-            case SseErrorKind.InvalidOutboundField => true;
-            case _ => false
-        }
-        case SseErrorKind.LineTooLarge => match (right) {
-            case SseErrorKind.LineTooLarge => true;
-            case _ => false
-        }
-        case SseErrorKind.FieldTooLarge => match (right) {
-            case SseErrorKind.FieldTooLarge => true;
-            case _ => false
-        }
-        case SseErrorKind.EventTooLarge => match (right) {
-            case SseErrorKind.EventTooLarge => true;
-            case _ => false
-        }
-        case SseErrorKind.DataTooLarge => match (right) {
-            case SseErrorKind.DataTooLarge => true;
-            case _ => false
-        }
-        case SseErrorKind.BufferLimitExceeded => match (right) {
-            case SseErrorKind.BufferLimitExceeded => true;
-            case _ => false
-        }
-        case SseErrorKind.InvalidConfiguration => match (right) {
-            case SseErrorKind.InvalidConfiguration => true;
-            case _ => false
-        }
-        case SseErrorKind.HttpResponseRejected => match (right) {
-            case SseErrorKind.HttpResponseRejected => true;
-            case _ => false
-        }
-        case SseErrorKind.TransportFailure => match (right) {
-            case SseErrorKind.TransportFailure => true;
-            case _ => false
-        }
-        case SseErrorKind.Cancelled => match (right) {
-            case SseErrorKind.Cancelled => true;
-            case _ => false
-        }
-        case SseErrorKind.Closed => match (right) {
-            case SseErrorKind.Closed => true;
-            case _ => false
-        }
-        case SseErrorKind.ReconnectExhausted => match (right) {
-            case SseErrorKind.ReconnectExhausted => true;
-            case _ => false
-        }
-        case SseErrorKind.SlowConsumer => match (right) {
-            case SseErrorKind.SlowConsumer => true;
-            case _ => false
-        }
-        case SseErrorKind.ReplayGap => match (right) {
-            case SseErrorKind.ReplayGap => true;
-            case _ => false
-        }
-        case SseErrorKind.InternalInvariantViolation => match (right) {
-            case SseErrorKind.InternalInvariantViolation => true;
-            case _ => false
-        }
     }
 }

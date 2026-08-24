@@ -1,5 +1,8 @@
 package sse4cj
 
+import std.deriving.Derive
+
+@Derive[Equatable]
 public enum SseErrorKind {
     InvalidUtf8
     | InvalidOutboundField

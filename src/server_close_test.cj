@@ -60,17 +60,6 @@ private class BlockingCapabilityWriter <: SseConnectionWriter {
     }
 }
 
-private func capSendIs(value: SseSendStatus, expected: SseSendStatus): Bool {
-    match (value) {
-        case SseSendStatus.Accepted => match (expected) { case SseSendStatus.Accepted => true; case _ => false }
-        case SseSendStatus.Rejected => match (expected) { case SseSendStatus.Rejected => true; case _ => false }
-        case SseSendStatus.Dropped => match (expected) { case SseSendStatus.Dropped => true; case _ => false }
-        case SseSendStatus.Disconnected => match (expected) { case SseSendStatus.Disconnected => true; case _ => false }
-        case SseSendStatus.Closed => match (expected) { case SseSendStatus.Closed => true; case _ => false }
-        case SseSendStatus.Failed => match (expected) { case SseSendStatus.Failed => true; case _ => false }
-    }
-}
-
 @Test
 func capabilityAwareCloseEvictsImmediatelyButRetainsInflightBudget() {
     let hub = SseHub()
@@ -79,7 +68,7 @@ func capabilityAwareCloseEvictsImmediatelyButRetainsInflightBudget() {
         config: SseConnectionConfig(maxQueuedFrames: 1, maxQueuedBytes: 1024, transportAbortCapability: SseTransportAbortCapability.ServerWideOnly)
     )
     hub.attach(connection)
-    @Assert(capSendIs(connection.send(SseFrame(data: Some("first"))).status, SseSendStatus.Accepted))
+    @Assert(connection.send(SseFrame(data: Some("first"))).status == SseSendStatus.Accepted)
 
     let writer = BlockingCapabilityWriter(SseTransportAbortCapability.ServerWideOnly)
     connection.start(writer)
@@ -89,7 +78,7 @@ func capabilityAwareCloseEvictsImmediatelyButRetainsInflightBudget() {
     @Assert(connection.inFlightByteCount > 0)
 
     let overflow = connection.send(SseFrame(data: Some("second")))
-    @Assert(capSendIs(overflow.status, SseSendStatus.Disconnected))
+    @Assert(overflow.status == SseSendStatus.Disconnected)
     @Assert(connection.isClosed)
     @Assert(!connection.isTransportClosed)
     @Assert(hub.connectionCount, 0)
@@ -136,5 +125,5 @@ func closeNowDropsPendingQueueBeforeWriterStarts() {
     @Assert(connection.bufferedFrameCount, 0)
     @Assert(connection.bufferedByteCount, 0)
     @Assert(connection.isTransportClosed)
-    @Assert(capSendIs(connection.send(SseFrame(data: Some("three"))).status, SseSendStatus.Closed))
+    @Assert(connection.send(SseFrame(data: Some("three"))).status == SseSendStatus.Closed)
 }
