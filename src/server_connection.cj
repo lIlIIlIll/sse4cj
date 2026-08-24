@@ -137,7 +137,7 @@ public class SseConnection {
         }
         let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
         let drained = synchronized(mutex) {
-            while (!transportClosed && queue.size + inFlightFrames > 0) {
+            while (!logicalClosed && !transportClosed && queue.size + inFlightFrames > 0) {
                 let remaining = deadline - MonoTime.now()
                 if (remaining <= Duration.Zero) { break }
                 condition.wait(timeout: remaining)

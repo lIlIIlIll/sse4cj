@@ -37,6 +37,10 @@ Open -> Draining -> LogicallyClosed -> TransportClosed
 
 The current stdx HTTP server path uses `ServerWideOnly`. Its `HttpResponseWriter` public surface does not expose a per-response abort/interrupt operation, so sse4cj must not claim immediate physical teardown of an already-blocked write.
 
+Server shutdown is ordered in two phases: all endpoint and Hub admission gates close first, then graceful draining begins against one shared monotonic deadline. A concurrent `SseServer.closeNow()` upgrades that drain exactly once. Logical connection closure wakes the graceful waiters immediately; physical termination of an in-flight stdx write still occurs only when the write returns/fails or the server-wide transport close takes effect.
+
+In the current daily SDK, `ServerBuilder.build()` immediately creates and binds the server socket. If shutdown wins before start publication, sse4cj closes that unpublished server outside its registry lock. The same SDK's `Server.closeGracefully()` sets its quit flag before pool draining, and a later `Server.close()` then becomes a no-op. To preserve force-upgrade semantics, sse4cj never uses that transport-level graceful operation: after bounded SSE queue draining it calls `Server.close()` directly.
+
 `SseServer.register()` rejects endpoint connection configs that claim another abort capability. This prevents a caller from configuring the stdx writer as `Immediate` when the adapter cannot provide that behavior.
 
 ## Resource accounting

@@ -21,6 +21,8 @@ public class SseHub {
     private var connections = HashMap<String, SseConnection>()
     private let replay: Option<ReplayProvider>
     private let closing = AtomicBool(false)
+    private let forceClosing = AtomicBool(false)
+    private let gracefulDrainStarted = AtomicBool(false)
 
     public init(replay!: Option<ReplayProvider> = None<ReplayProvider>) { this.replay = replay }
 
@@ -95,15 +97,23 @@ public class SseHub {
     }
 
     public func closeNow(): Unit {
-        if (closing.swap(true)) { return }
+        closing.store(true)
+        if (forceClosing.swap(true)) { return }
         for (connection in snapshot()) { connection.closeNow() }
     }
 
     public func closeGracefully(timeoutMillis: Int64): Unit {
         if (timeoutMillis <= 0 || timeoutMillis > 24 * 60 * 60 * 1000) { throw SseException(SseErrorKind.InvalidConfiguration, "graceful close timeout must be finite and positive") }
-        if (closing.swap(true)) { return }
-        let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
+        beginClosing()
+        drainGracefullyUntil(MonoTime.now() + Duration.millisecond * timeoutMillis)
+    }
+
+    func beginClosing(): Unit { closing.store(true) }
+
+    func drainGracefullyUntil(deadline: MonoTime): Unit {
+        if (forceClosing.load() || !gracefulDrainStarted.compareAndSwap(false, true)) { return }
         for (connection in snapshot()) {
+            if (forceClosing.load()) { return }
             let remaining = deadline - MonoTime.now()
             if (remaining <= Duration.Zero) { connection.closeNow() }
             else {

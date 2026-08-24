@@ -178,15 +178,15 @@ Replay frames are enqueued before live frames. A `SyncCounter` or flag ensures r
 
 ### Server-side
 
-- `closeNow()`: sets closing flag, closes HTTP server (breaks listener + sockets), writer tasks exit on next `write()` exception.
-- `closeGracefully(deadline)`: sets closing flag, stops accepting new connections, drains queues until deadline, then force-closes.
+- `closeNow()`: closes every endpoint admission gate, logically closes every connection, then closes the HTTP server (breaking listener + sockets). It can upgrade an in-progress graceful close and wake its drain waiters immediately.
+- `closeGracefully(deadline)`: closes every endpoint admission gate before waiting on any writer, drains all endpoints against one shared monotonic deadline, then force-closes the stdx server transport.
 - **Cannot interrupt in-progress `write()`** — see stdx constraints above.
 
 ## Graceful shutdown
 
 ```
 stop accepting new connections
-→ endpoint.markClosing()
+→ mark every endpoint and Hub closing
 → drain: writer tasks continue consuming queues
 → deadline: close HTTP server
 → sockets break → write() throws → writer tasks exit
@@ -194,7 +194,9 @@ stop accepting new connections
 → clear registry
 ```
 
-Idempotent: subsequent calls are no-ops.
+Repeated calls are idempotent. `closeNow()` is a stronger operation: when it races with or follows `closeGracefully()`, it runs once, wakes the graceful drain through logical connection closure, and does not wait for the original graceful deadline.
+
+The current daily stdx `Server.closeGracefully()` is first-close-wins: it sets its quit flag before draining, so a later `close()` cannot upgrade it to forced transport teardown. sse4cj therefore performs graceful behavior only at its bounded application queues and always finishes server shutdown with `Server.close()`.
 
 ## HTTP/1.1 and HTTP/2 behavior
 

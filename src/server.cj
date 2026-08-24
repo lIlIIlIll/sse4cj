@@ -77,6 +77,8 @@ public class SseEndpoint {
     public let config: SseEndpointConfig
     private let admission: Option<SseAdmissionHandler>
     private let closing = AtomicBool(false)
+    let closeMutex = Mutex()
+    let closeChanged = synchronized(closeMutex) { closeMutex.condition() }
 
     public init(
         path: String,
@@ -128,14 +130,27 @@ public class SseEndpoint {
     }
 
     public func closeNow(): Unit {
-        closing.store(true)
+        beginClosing()
         hub.closeNow()
     }
 
     public func closeGracefully(timeoutMillis: Int64): Unit {
-        closing.store(true)
-        hub.closeGracefully(timeoutMillis)
+        if (timeoutMillis <= 0 || timeoutMillis > 24 * 60 * 60 * 1000) {
+            throw SseException(SseErrorKind.InvalidConfiguration, "graceful close timeout must be finite and positive")
+        }
+        beginClosing()
+        hub.drainGracefullyUntil(MonoTime.now() + Duration.millisecond * timeoutMillis)
     }
+
+    func beginClosing(): Unit {
+        synchronized(closeMutex) {
+            closing.store(true)
+            closeChanged.notifyAll()
+        }
+        hub.beginClosing()
+    }
+
+    func drainGracefullyUntil(deadline: MonoTime): Unit { hub.drainGracefullyUntil(deadline) }
 }
 
 private class StdxSseConnectionWriter <: SseConnectionWriter {
@@ -189,6 +204,41 @@ public class SseServerConfig {
     }
 }
 
+abstract class SseServerTransport {
+    public prop port: UInt16
+    public func register(path: String, handler: (HttpContext) -> Unit): Unit
+    public func serve(): Unit
+    public func close(): Unit
+}
+
+abstract class SseServerTransportFactory {
+    public func build(config: SseServerConfig, afterBind: () -> Unit): SseServerTransport
+}
+
+private class StdxSseServerTransport <: SseServerTransport {
+    private let server: Server
+
+    init(server: Server) { this.server = server }
+
+    public prop port: UInt16 { get() { server.port } }
+    public func register(path: String, handler: (HttpContext) -> Unit): Unit {
+        server.distributor.register(path, handler)
+    }
+    public func serve(): Unit { server.serve() }
+    public func close(): Unit { server.close() }
+}
+
+private class StdxSseServerTransportFactory <: SseServerTransportFactory {
+    public func build(config: SseServerConfig, afterBind: () -> Unit): SseServerTransport {
+        // Do not enable stdx ServerBuilder.writeTimeout for SSE responses.
+        // Current stdx HTTP/1.1 treats it as a response-lifetime timer.
+        StdxSseServerTransport(ServerBuilder().addr(config.address).port(config.port)
+            .readTimeout(Duration.millisecond * config.readTimeoutMillis)
+            .readHeaderTimeout(Duration.millisecond * config.readHeaderTimeoutMillis)
+            .afterBind(afterBind).build())
+    }
+}
+
 public class SseServer {
     private let config: SseServerConfig
     private let mutex = Mutex()
@@ -196,17 +246,23 @@ public class SseServer {
     private let endpoints = HashMap<String, SseEndpoint>()
     private let started = AtomicBool(false)
     private let closing = AtomicBool(false)
+    private let gracefulStarted = AtomicBool(false)
+    private let forceClosing = AtomicBool(false)
+    private let transportClosing = AtomicBool(false)
     private let nextConnectionId = AtomicInt64(1)
     private let activeConnectionCount = AtomicInt64(0)
-    private var server: Option<Server> = None<Server>
+    private var server: Option<SseServerTransport> = None<SseServerTransport>
     private var worker: Option<Future<Unit>> = None<Future<Unit>>
     private var bound = false
     private var serveError: Option<Exception> = None<Exception>
+    var transportFactory: SseServerTransportFactory = StdxSseServerTransportFactory()
 
     public init(config!: SseServerConfig = SseServerConfig()) { this.config = config }
 
     public func register(endpoint: SseEndpoint): Unit {
-        if (started.load()) { throw SseException(SseErrorKind.InvalidConfiguration, "register endpoints before server start") }
+        if (started.load() || closing.load()) {
+            throw SseException(SseErrorKind.InvalidConfiguration, "register endpoints before server start or shutdown")
+        }
         match (endpoint.config.connection.transportAbortCapability) {
             case SseTransportAbortCapability.ServerWideOnly => ()
             case _ => throw SseException(
@@ -215,6 +271,9 @@ public class SseServer {
             )
         }
         synchronized(mutex) {
+            if (started.load() || closing.load()) {
+                throw SseException(SseErrorKind.InvalidConfiguration, "register endpoints before server start or shutdown")
+            }
             if (endpoints.contains(endpoint.path)) { throw SseException(SseErrorKind.InvalidConfiguration, "duplicate SSE endpoint path") }
             endpoints[endpoint.path] = endpoint
         }
@@ -228,23 +287,30 @@ public class SseServer {
     }
 
     public func start(): Unit {
-        if (!started.compareAndSwap(false, true)) { throw SseException(SseErrorKind.InvalidConfiguration, "server already started") }
-        // Do not enable stdx ServerBuilder.writeTimeout for SSE responses.
-        // Current stdx HTTP/1.1 treats it as a response-lifetime timer, so an
-        // actively streaming SSE response is still disconnected when the timer
-        // expires. Slow-consumer handling therefore relies on bounded buffers
-        // and logical eviction; in-flight transport teardown is ServerWideOnly.
-        let built = ServerBuilder().addr(config.address).port(config.port)
-            .readTimeout(Duration.millisecond * config.readTimeoutMillis)
-            .readHeaderTimeout(Duration.millisecond * config.readHeaderTimeoutMillis)
-            .afterBind({ => synchronized(mutex) { bound = true; bindCondition.notifyAll() } }).build()
-        let snapshot = snapshotEndpoints()
-        for (endpoint in snapshot) { built.distributor.register(endpoint.path, {ctx => handleRequest(endpoint, ctx)}) }
-        synchronized(mutex) { server = Some(built) }
-        let future: Future<Unit> = spawn { => try { built.serve() } catch (error: Exception) {
-            if (!closing.load()) { synchronized(mutex) { serveError = Some(error); bindCondition.notifyAll() } }
-        } }
-        synchronized(mutex) { worker = Some(future) }
+        let snapshot = synchronized(mutex) {
+            if (closing.load()) { throw SseException(SseErrorKind.InvalidConfiguration, "server is closing") }
+            if (!started.compareAndSwap(false, true)) { throw SseException(SseErrorKind.InvalidConfiguration, "server already started") }
+            let values = ArrayList<SseEndpoint>()
+            for (endpoint in endpoints.values()) { values.add(endpoint) }
+            values.toArray()
+        }
+        let factory = synchronized(mutex) { transportFactory }
+        let built = factory.build(config, { => synchronized(mutex) {
+            bound = true
+            bindCondition.notifyAll()
+        } })
+        for (endpoint in snapshot) { built.register(endpoint.path, {ctx => handleRequest(endpoint, ctx)}) }
+        let published = synchronized(mutex) {
+            if (closing.load()) { false }
+            else {
+                server = Some(built)
+                worker = Some(spawn { => try { built.serve() } catch (error: Exception) {
+                    if (!closing.load()) { synchronized(mutex) { serveError = Some(error); bindCondition.notifyAll() } }
+                } })
+                true
+            }
+        }
+        if (!published) { built.close() }
     }
 
     public func awaitBound(timeoutMillis!: Int64 = 5_000): Unit {
@@ -262,22 +328,26 @@ public class SseServer {
     }
 
     public func closeNow(): Unit {
-        if (closing.swap(true)) { return }
-        for (endpoint in snapshotEndpoints()) { endpoint.closeNow() }
-        match (synchronized(mutex) { server }) { case Some(value) => value.close(); case None => () }
-        awaitServerWorker()
+        closing.store(true)
+        if (forceClosing.swap(true)) { return }
+        let snapshot = snapshotEndpoints()
+        for (endpoint in snapshot) { endpoint.beginClosing() }
+        for (endpoint in snapshot) { endpoint.closeNow() }
+        closeServerTransport()
     }
 
     public func closeGracefully(timeoutMillis: Int64): Unit {
-        if (timeoutMillis <= 0) { throw SseException(SseErrorKind.InvalidConfiguration, "shutdown timeout must be positive") }
-        if (closing.swap(true)) { return }
-        let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
-        for (endpoint in snapshotEndpoints()) {
-            let remaining = deadline - MonoTime.now()
-            if (remaining <= Duration.Zero) { endpoint.closeNow() } else { endpoint.closeGracefully(durationToMillisCeil(remaining)) }
+        if (timeoutMillis <= 0 || timeoutMillis > 24 * 60 * 60 * 1000) {
+            throw SseException(SseErrorKind.InvalidConfiguration, "shutdown timeout must be finite and positive")
         }
-        match (synchronized(mutex) { server }) { case Some(value) => value.closeGracefully(); case None => () }
-        awaitServerWorker()
+        if (forceClosing.load() || !gracefulStarted.compareAndSwap(false, true)) { return }
+        closing.store(true)
+        let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
+        let snapshot = snapshotEndpoints()
+        for (endpoint in snapshot) { endpoint.beginClosing() }
+        for (endpoint in snapshot) { endpoint.drainGracefullyUntil(deadline) }
+        if (forceClosing.load()) { return }
+        closeServerTransport()
     }
 
     private func handleRequest(endpoint: SseEndpoint, ctx: HttpContext): Unit {
@@ -335,11 +405,11 @@ public class SseServer {
             case None => ()
         }
     }
-}
 
-private func durationToMillisCeil(duration: Duration): Int64 {
-    let nanos = duration.toNanoseconds()
-    if (nanos <= 0) { return 1 }
-    let millis = nanos / 1_000_000
-    if (nanos % 1_000_000 == 0) { millis } else { millis + 1 }
+    private func closeServerTransport(): Unit {
+        if (!transportClosing.swap(true)) {
+            match (synchronized(mutex) { server }) { case Some(value) => value.close(); case None => () }
+        }
+        awaitServerWorker()
+    }
 }

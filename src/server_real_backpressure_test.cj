@@ -67,6 +67,43 @@ private func largeAsciiData(size: Int64): String {
     String.fromUtf8(Array<Byte>(size, repeat: b'x'))
 }
 
+private func openLogicallyEvictedNonReadingConnection(): (SseServer, SseEndpoint, SseTransportResponse) {
+    let connectionConfig = SseConnectionConfig(
+        maxQueuedFrames: 8,
+        maxQueuedBytes: 2 * 1024 * 1024,
+        backpressure: SseBackpressureStrategy.DisconnectSlowConsumer,
+        transportAbortCapability: SseTransportAbortCapability.ServerWideOnly
+    )
+    let endpoint = SseEndpoint(
+        "/events",
+        config: SseEndpointConfig(connection: connectionConfig, initialComment: Some("open"))
+    )
+    let server = SseServer(config: SseServerConfig(address: "127.0.0.1", port: 0, writeTimeoutMillis: 60_000))
+    server.register(endpoint)
+    server.start()
+    server.awaitBound()
+
+    let response = StdxSseClientTransport().send(
+        SseHttpRequest("http://127.0.0.1:${server.boundPort}/events", readTimeoutMillis: 60_000),
+        None<SseCancellationToken>
+    )
+    @Assert(response.status(), 200)
+    @Assert(endpoint.hub.connectionCount, 1)
+
+    let frame = SseEncoder.encode(SseFrame(data: Some(largeAsciiData(256 * 1024))))
+    var disconnected = false
+    for (_ in 0..512) {
+        let stats = endpoint.hub.broadcast(frame)
+        if (stats.disconnected > 0 || endpoint.hub.connectionCount == 0) {
+            disconnected = true
+            break
+        }
+    }
+    @Assert(disconnected)
+    @Assert(endpoint.hub.connectionCount, 0)
+    (server, endpoint, response)
+}
+
 @Test
 func stdxRealLoopbackStreamsEventBeforeResponseClose() {
     let endpoint = SseEndpoint("/events", config: SseEndpointConfig(initialComment: Some("open")))
@@ -110,39 +147,7 @@ func stdxRealLoopbackStreamsEventBeforeResponseClose() {
 
 @Test
 func nonReadingClientIsLogicallyEvictedByBufferedLimit() {
-    let connectionConfig = SseConnectionConfig(
-        maxQueuedFrames: 8,
-        maxQueuedBytes: 2 * 1024 * 1024,
-        backpressure: SseBackpressureStrategy.DisconnectSlowConsumer,
-        transportAbortCapability: SseTransportAbortCapability.ServerWideOnly
-    )
-    let endpoint = SseEndpoint(
-        "/events",
-        config: SseEndpointConfig(connection: connectionConfig, initialComment: Some("open"))
-    )
-    let server = SseServer(config: SseServerConfig(address: "127.0.0.1", port: 0, writeTimeoutMillis: 60_000))
-    server.register(endpoint)
-    server.start()
-    server.awaitBound()
-
-    let response = StdxSseClientTransport().send(
-        SseHttpRequest("http://127.0.0.1:${server.boundPort}/events", readTimeoutMillis: 60_000),
-        None<SseCancellationToken>
-    )
-    @Assert(response.status(), 200)
-    @Assert(endpoint.hub.connectionCount, 1)
-
-    let frame = SseEncoder.encode(SseFrame(data: Some(largeAsciiData(256 * 1024))))
-    var disconnected = false
-    for (_ in 0..512) {
-        let stats = endpoint.hub.broadcast(frame)
-        if (stats.disconnected > 0 || endpoint.hub.connectionCount == 0) {
-            disconnected = true
-            break
-        }
-    }
-    @Assert(disconnected)
-    @Assert(endpoint.hub.connectionCount, 0)
+    let (server, _, response) = openLogicallyEvictedNonReadingConnection()
 
     // Logical eviction must not require the client to read or close first.
     let closeDone = CompletionLatch()
@@ -156,6 +161,26 @@ func nonReadingClientIsLogicallyEvictedByBufferedLimit() {
     @Assert(serverClosedPromptly)
     closeTask.get()
     response.close()
+}
+
+@Test
+func gracefulApplicationDrainForceClosesBlockedStdxTransport() {
+    let (server, _, response) = openLogicallyEvictedNonReadingConnection()
+    let closeDone = CompletionLatch()
+    let closeTask: Future<Unit> = spawn {
+        => try { server.closeGracefully(10) }
+        finally { closeDone.complete() }
+    }
+    let closedWithinBound = closeDone.await(2000)
+    if (!closedWithinBound) {
+        // A transport-level closeGracefully() blocks on this non-reading client.
+        // Always release it before failing so the test cannot leak a handler.
+        response.close()
+        let _ = closeDone.await(2000)
+    }
+    if (closedWithinBound) { response.close() }
+    closeTask.get(Duration.second)
+    @Assert(closedWithinBound)
 }
 
 @Test
