@@ -71,9 +71,10 @@ public class SseConnectionConfig {
         heartbeatIntervalMillis!: Int64 = 15_000,
         heartbeatComment!: String = "heartbeat",
         heartbeatOnlyWhenIdle!: Bool = true,
-        transportAbortCapability!: SseTransportAbortCapability = SseTransportAbortCapability.ServerWideOnly
+        transportAbortCapability!: SseTransportAbortCapability = SseTransportAbortCapability.Immediate
     ) {
-        if (maxQueuedFrames <= 0 || maxQueuedFrames > 1_000_000 || maxQueuedBytes <= 0 || maxQueuedBytes > 1024 * 1024 * 1024) {
+        if (maxQueuedFrames <= 0 || maxQueuedFrames > 1_000_000 || maxQueuedBytes <= 0 || maxQueuedBytes > 1024 * 1024 *
+            1024) {
             throw SseException(SseErrorKind.InvalidConfiguration, "connection buffer limits must be finite and positive")
         }
         if (blockTimeoutMillis <= 0 || blockTimeoutMillis > 60_000) {
@@ -82,7 +83,9 @@ public class SseConnectionConfig {
         if (heartbeatEnabled && heartbeatIntervalMillis <= 0) {
             throw SseException(SseErrorKind.InvalidConfiguration, "heartbeat interval must be positive")
         }
-        if (heartbeatEnabled) { SseEncoder.encode(SseFrame(comment: Some(heartbeatComment))) }
+        if (heartbeatEnabled) {
+            SseEncoder.encode(SseFrame(comment: Some(heartbeatComment)))
+        }
         this.maxQueuedFrames = maxQueuedFrames
         this.maxQueuedBytes = maxQueuedBytes
         this.backpressure = backpressure
@@ -97,7 +100,9 @@ public class SseConnectionConfig {
     public static let DEFAULTS: SseConnectionConfig = SseConnectionConfig()
 }
 
-public enum ReplayGapPolicy { StartLive | Reject | Reset }
+public enum ReplayGapPolicy {
+    StartLive | Reject | Reset
+}
 
 public interface ReplayProvider {
     func store(frame: EncodedSseFrame, id: String): Unit

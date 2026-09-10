@@ -24,7 +24,7 @@ public class EventSourceClient {
     public init(
         config: EventSourceConfig,
         callbacks!: EventSourceCallbacks = EventSourceCallbacks(),
-        transport!: SseClientTransport = StdxSseClientTransport(),
+        transport!: SseClientTransport = WirestackSseClientTransport(),
         sleeper!: SseReconnectSleeper = DefaultSseReconnectSleeper(),
         jitterSource!: SseJitterSource = DefaultSseJitterSource(),
         dispatcher!: SseCallbackDispatcher = InlineSseCallbackDispatcher()
@@ -122,8 +122,12 @@ public class EventSourceClient {
                 connectionAttempts++
                 setState(EventSourceReadyState.CONNECTING)
                 let cancellation = SseCancellationToken()
-                synchronized(stateMutex) {
+                let cancelBeforeAttempt = synchronized(stateMutex) {
                     activeCancellation = Some(cancellation)
+                    closed.load()
+                }
+                if (cancelBeforeAttempt) {
+                    cancellation.cancel()
                 }
 
                 let outcome = tryAttempt(cancellation)
@@ -181,6 +185,9 @@ public class EventSourceClient {
         try {
             let value = transport.send(buildRequest(), Some(cancellation))
             try {
+                if (closed.load() || cancellation.isCancelled) {
+                    return EventSourceAttemptOutcome.Stop
+                }
                 if (value.status() == 204) {
                     return EventSourceAttemptOutcome.Stop
                 }
@@ -235,7 +242,7 @@ public class EventSourceClient {
         SseHttpRequest(
             config.url,
             headers: headers.toArray(),
-            connectTimeoutMillis: config.connectTimeoutMillis,
+            openTimeoutMillis: config.openTimeoutMillis,
             readTimeoutMillis: config.readTimeoutMillis
         )
     }
@@ -256,6 +263,9 @@ public class EventSourceClient {
 
     private func setState(value: EventSourceReadyState): Unit {
         synchronized(stateMutex) {
+            if (closed.load() && value != EventSourceReadyState.CLOSED) {
+                return
+            }
             stateValue = value
         }
     }

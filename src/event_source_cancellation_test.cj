@@ -155,10 +155,9 @@ func eventSourceCloseInterruptsReconnectSleep() {
 }
 
 @Test
-func eventSourceCloseInterruptsRealStdxBlockingRead() {
+func wirestackEventSourceCloseInterruptsBlockingRead() {
     let endpoint = SseEndpoint("/events")
-    let server = SseServer(
-        config: SseServerConfig(address: "127.0.0.1", port: 0, readTimeoutMillis: 5000, writeTimeoutMillis: 5000))
+    let server = SseServer()
     server.register(endpoint)
     server.start()
     server.awaitBound()
@@ -167,7 +166,7 @@ func eventSourceCloseInterruptsRealStdxBlockingRead() {
     let client = EventSourceClient(
         EventSourceConfig(
             "http://127.0.0.1:${server.boundPort}/events",
-            connectTimeoutMillis: 2000,
+            openTimeoutMillis: 2000,
             readTimeoutMillis: 5000,
             reconnectPolicy: SseReconnectPolicy(initialDelayMillis: 5000, maxDelayMillis: 5000)
         ),

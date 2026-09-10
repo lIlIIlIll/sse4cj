@@ -5,7 +5,9 @@ import std.time.*
 
 private class DeadlineBlockingWriter <: SseConnectionWriter {
     private let mutex = Mutex()
-    private let condition = synchronized(mutex) { mutex.condition() }
+    private let condition = synchronized(mutex) {
+        mutex.condition()
+    }
     private var entered = false
     private var released = false
 
@@ -14,24 +16,37 @@ private class DeadlineBlockingWriter <: SseConnectionWriter {
         synchronized(mutex) {
             entered = true
             condition.notifyAll()
-            while (!released) { condition.wait() }
+            while (!released) {
+                condition.wait()
+            }
         }
     }
     public func flush(): Unit {}
-    public func close(): Unit { synchronized(mutex) { condition.notifyAll() } }
+    public func close(): Unit {
+        synchronized(mutex) {
+            condition.notifyAll()
+        }
+    }
 
     func awaitEntered(timeoutMillis!: Int64 = 1000): Bool {
         let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
         synchronized(mutex) {
             while (!entered) {
                 let remaining = deadline - MonoTime.now()
-                if (remaining <= Duration.Zero) { break }
+                if (remaining <= Duration.Zero) {
+                    break
+                }
                 condition.wait(timeout: remaining)
             }
             entered
         }
     }
-    func release(): Unit { synchronized(mutex) { released = true; condition.notifyAll() } }
+    func release(): Unit {
+        synchronized(mutex) {
+            released = true
+            condition.notifyAll()
+        }
+    }
 }
 
 @Test
@@ -39,7 +54,11 @@ func gracefulDeadlineClosesLogicallyBeforeTransportReturns() {
     let hub = SseHub()
     let connection = SseConnection(
         "graceful-blocked",
-        config: SseConnectionConfig(maxQueuedFrames: 2, maxQueuedBytes: 1024)
+        config: SseConnectionConfig(
+            maxQueuedFrames: 2,
+            maxQueuedBytes: 1024,
+            transportAbortCapability: SseTransportAbortCapability.ServerWideOnly
+        )
     )
     hub.attach(connection)
     connection.send(SseFrame(data: Some("first")))
@@ -66,7 +85,8 @@ func blockWithTimeoutCountsInflightFrameAgainstCapacity() {
             maxQueuedFrames: 1,
             maxQueuedBytes: 1024,
             backpressure: SseBackpressureStrategy.BlockWithTimeout,
-            blockTimeoutMillis: 10
+            blockTimeoutMillis: 10,
+            transportAbortCapability: SseTransportAbortCapability.ServerWideOnly
         )
     )
     connection.send(SseFrame(data: Some("first")))
