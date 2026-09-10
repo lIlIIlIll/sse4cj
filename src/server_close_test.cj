@@ -5,7 +5,9 @@ import std.time.*
 
 private class BlockingCapabilityWriter <: SseConnectionWriter {
     private let mutex = Mutex()
-    private let condition = synchronized(mutex) { mutex.condition() }
+    private let condition = synchronized(mutex) {
+        mutex.condition()
+    }
     private let capabilityValue: SseTransportAbortCapability
     private var entered = false
     private var released = false
@@ -21,7 +23,9 @@ private class BlockingCapabilityWriter <: SseConnectionWriter {
         synchronized(mutex) {
             entered = true
             condition.notifyAll()
-            while (!released) { condition.wait() }
+            while (!released) {
+                condition.wait()
+            }
         }
     }
 
@@ -45,7 +49,9 @@ private class BlockingCapabilityWriter <: SseConnectionWriter {
         synchronized(mutex) {
             while (!entered) {
                 let remaining = deadline - MonoTime.now()
-                if (remaining <= Duration.Zero) { break }
+                if (remaining <= Duration.Zero) {
+                    break
+                }
                 condition.wait(timeout: remaining)
             }
             entered
@@ -65,7 +71,8 @@ func capabilityAwareCloseEvictsImmediatelyButRetainsInflightBudget() {
     let hub = SseHub()
     let connection = SseConnection(
         "blocked",
-        config: SseConnectionConfig(maxQueuedFrames: 1, maxQueuedBytes: 1024, transportAbortCapability: SseTransportAbortCapability.ServerWideOnly)
+        config: SseConnectionConfig(maxQueuedFrames: 1, maxQueuedBytes: 1024,
+            transportAbortCapability: SseTransportAbortCapability.ServerWideOnly)
     )
     hub.attach(connection)
     @Assert(connection.send(SseFrame(data: Some("first"))).status == SseSendStatus.Accepted)
@@ -95,7 +102,8 @@ func capabilityAwareCloseEvictsImmediatelyButRetainsInflightBudget() {
 
 @Test
 func immediateAbortCapabilityIsInvokedOnLogicalClose() {
-    let connection = SseConnection("immediate", config: SseConnectionConfig(transportAbortCapability: SseTransportAbortCapability.Immediate))
+    let connection = SseConnection("immediate",
+        config: SseConnectionConfig(transportAbortCapability: SseTransportAbortCapability.Immediate))
     connection.send(SseFrame(data: Some("x")))
     let writer = BlockingCapabilityWriter(SseTransportAbortCapability.Immediate)
     connection.start(writer)

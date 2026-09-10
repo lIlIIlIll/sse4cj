@@ -20,24 +20,24 @@ public class SseHeader {
 
 public class SseHttpRequest {
     public let url: String
-    public let connectTimeoutMillis: Int64
+    public let openTimeoutMillis: Int64
     public let readTimeoutMillis: Int64
     private let requestHeaders: Array<SseHeader>
 
     public init(
         url: String,
         headers!: Array<SseHeader> = [],
-        connectTimeoutMillis!: Int64 = 10_000,
+        openTimeoutMillis!: Int64 = 10_000,
         readTimeoutMillis!: Int64 = 120_000
     ) {
         if (url.size == 0) {
             throw SseException(SseErrorKind.InvalidConfiguration, "SSE request URL must not be empty")
         }
-        validateTimeout(connectTimeoutMillis, "connectTimeoutMillis")
+        validateTimeout(openTimeoutMillis, "openTimeoutMillis")
         validateTimeout(readTimeoutMillis, "readTimeoutMillis")
         this.url = url
         this.requestHeaders = headers.clone()
-        this.connectTimeoutMillis = connectTimeoutMillis
+        this.openTimeoutMillis = openTimeoutMillis
         this.readTimeoutMillis = readTimeoutMillis
     }
 
@@ -81,48 +81,6 @@ func isEventStreamContentType(value: String): Bool {
             end--
         }
         return asciiRangeEqualsIgnoreCase(value, start, end, "text/event-stream")
-    }
-}
-
-func originFromHttpUrl(url: String): Option<String> {
-    unsafe {
-        let bytes = url.rawData()
-        var colon: Int64 = -1
-        for (index in 0..bytes.size) {
-            if (bytes[index] == b':') {
-                colon = index
-                break
-            }
-        }
-        if (colon <= 0 || colon + 2 >= bytes.size || bytes[colon + 1] != b'/' || bytes[colon + 2] != b'/') {
-            return None<String>
-        }
-        if (!asciiRangeEqualsIgnoreCase(url, 0, colon, "http") && !asciiRangeEqualsIgnoreCase(url, 0, colon, "https")) {
-            return None<String>
-        }
-        var authorityEnd = bytes.size
-        for (index in (colon + 3)..bytes.size) {
-            if (bytes[index] == b'/' || bytes[index] == b'?' || bytes[index] == b'#') {
-                authorityEnd = index
-                break
-            }
-        }
-        if (authorityEnd == colon + 3) {
-            return None<String>
-        }
-        var authorityStart = colon + 3
-        for (index in authorityStart..authorityEnd) {
-            if (bytes[index] == b'@') {
-                authorityStart = index + 1
-            }
-        }
-        if (authorityStart >= authorityEnd) {
-            return None<String>
-        }
-        let out = SseByteBuffer(capacity: colon + 3 + authorityEnd - authorityStart)
-        out.appendStringRange(url, 0, colon + 3)
-        out.appendStringRange(url, authorityStart, authorityEnd - authorityStart)
-        Some(String.fromUtf8(out.toArray()))
     }
 }
 

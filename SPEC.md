@@ -48,7 +48,7 @@ sse4cj/
 ```text
 cjc
 cjpm
-stdx
+Wirestack（相邻源码 path dependency）
 
 ```
 
@@ -931,42 +931,20 @@ SseConnection
 
 ```
 
-### 0. 传输层约束（stdx HTTP 限制）
+### 0. 传输层约束（Wirestack）
 
-经源码验证（stdx `HttpResponseWriter`、`HttpContext`、`HttpEngineConn1`、`HttpEngineConn2`）：
+内置网络后端仅使用相邻 `../Wirestack`，不保留 stdx 后端、兼容别名或双后端配置。不得修改 Wirestack 源码。
 
-```text
-HttpResponseWriter 仅有 write(buf) 一个公开数据 API。
-无 close/abort/interrupt/flush/end。
-write() 在 synchronized(writerMtx) 中同步阻塞直到底层 socket 写完成。
-HttpContext 公开面不含 writerMtx、responded、upgraded 等内部状态。
-HttpEngineConn 是 abstract class（非 public），HttpEngineConn1/2 是 class（非 public）。
-外部包无法获取底层 socket 句柄或触发连接关闭。
-```
+- 客户端每次请求独立持有 `HttpClient`、request cancellation handle 和一个可唤醒的单调时钟 watchdog；禁止 Wirestack 隐式重试及自动跳转。
+- `openTimeoutMillis` 覆盖发送操作开始至响应头返回（DNS/TCP/TLS/请求发送）；`readTimeoutMillis` 对每次实际非空 body read 重新计时，调用者闲置时间不消耗预算。
+- 请求超时不取消 SSE token，保留 EventSource 可恢复重连语义；用户取消优先映射为 `Cancelled`。provider 错误不得携带完整 URL、凭据或原始 exception message。
+- 内置 server 使用 `Immediate` request-scoped abort。HTTP/1 中止该请求连接；HTTP/2 中止该 stream，不得关闭共享连接伤及 sibling。
+- `SseServerConfig` 仅接受 `listenEndpoint: SocketEndpoint`（默认 `127.0.0.1:0`）和 `maxConnections`（默认 1024，范围 `1..65536`）。
+- 删除 server address/port 字符串配置、read/write/header timeout 和 `SseServerRequest.remoteAddress`。当前后端**不提供有限 header-arrival deadline**，也不提供 peer-IP admission 字段；保留 Wirestack 默认有限 parser/header/连接数限制。
+- 队列继续在 enqueue 阶段决定背压；forced close 立即从 Hub 移除并请求底层取消，实际 body close 才释放 response reservation。
+- 通用 push writer 可如实声明 `ServerWideOnly` 或 `Unsupported`，但这不代表保留其他内置网络后端。
 
-writeTimeout 行为（stdx bug，非设计意图）：
-
-```text
-HTTP/1.1 writeResponseByWriter:
-    首次 flush header 时启动 writeTimer（一次性）。
-    后续每次 write() 不重置、不取消、不重启 writeTimer。
-    writeTimer 到期后 close()，无论连接是否健康。
-    → 会误杀活跃 SSE 长连接。
-
-HTTP/2 writeResponseByWriter:
-    无 writeTimer。
-    → 完全无写超时兜底。
-```
-
-设计约束：
-
-- 不得依赖 writeTimeout 作为慢消费者触发器（会误杀健康连接，HTTP/2 无覆盖）。
-- 慢消费者检测和断连决策必须在 write 返回前（enqueue 阶段）完成。
-- writer task 阻塞在 write() 中时，Hub 侧标记 dead connection 并停止 enqueue。
-- writer task 的协程释放依赖底层 socket 断开（客户端断连或引擎超时），sse4cj 无法主动 kill 协程。
-- 必须限制最大并发连接数，防止慢消费者攻击下协程累积。
-- 文档必须声明上述限制为已知 stdx 约束，而非 sse4cj 设计缺陷。
-- 如果未来 stdx 提供公开的 per-connection abort/close API，应立即采用并移除此限制声明。
+验证与支持声明限于实际编译、测试的 Linux x86_64 SDK/native 环境。默认客户端 HTTPS 验证系统信任与主机名；默认 server 保持明文 HTTP/1.1。包内 TLS 注入用于离线测试，不是新增公开 TLS 配置框架。
 
 ### 1. 所有权模型
 
@@ -1035,17 +1013,9 @@ Cache-Control: no-cache, no-transform
 
 ```
 
-禁止应用层硬编码：
+SSE core 不负责 HTTP framing，不得添加 `Connection: keep-alive`、`Keep-Alive` 或伪造 `Content-Length`。
 
-```http
-Transfer-Encoding: chunked
-Connection: keep-alive
-Keep-Alive: ...
-Content-Length: ...
-
-```
-
-HTTP/1.1 和 HTTP/2 framing 由底层 HTTP 实现负责。
+Wirestack HTTP/1.1 adapter 明确声明 `Transfer-Encoding: chunked` 和 `Connection: close`，由 provider 输出 chunk framing 和 terminal chunk。HTTP/2 不添加这两个 header，由 provider 输出 DATA/END_STREAM。禁止手写 HTTP 字节或放宽入站 body/chunk/header 限制来支持无限 SSE 流。
 
 可选提供：
 
@@ -1056,21 +1026,13 @@ X-Accel-Buffering: no
 
 但必须显式配置。
 
-检查底层 response writer 是否需要：
-
-- 显式 flush；
-- 首个 comment；
-- 特定 streaming API。
-- stdx `HttpResponseWriter` 无公开 flush API；
-- stdx `HttpResponseWriter` 无公开 close/abort API；
-- 首次 write 自动触发 header flush（chunked 或 content-length 由 stdx 检查）；
-- 后续 write 逐次写入 body，无显式 flush。
+通过真实 Wirestack `HttpBodyStream` 提供未知长度 body（`contentLength=None`），只按有界 destination 读取队列帧。不得聚合完整响应，也不得要求下一次 heartbeat 才能唤醒关闭中的空队列。
 
 通过实际 loopback 测试证明事件会立即逐条发送，而不是响应结束后一次性输出。
 
 ### 4. 单写者模型
 
-每个连接只能有一个 writer fiber/task 操作 response writer。
+每个连接只能有一个 transport consumer。Wirestack 的网络 writer 直接 pull 队列流；通用 push 模式由一个 writer fiber/task 操作 response writer，二者竞争同一个 owner claim。
 
 生产者只能将：
 
@@ -1083,26 +1045,11 @@ EncodedSseFrame
 
 禁止多个线程直接并发写同一个 HTTP response。
 
-Writer 负责：
+连接负责顺序出队、heartbeat、queued/in-flight 计数、逻辑关闭和幂等释放。Wirestack 负责实际网络写入与 HTTP 结束帧。
 
-```text
-顺序写出
-flush
-heartbeat
-write error 处理（write 抛异常后 deregister）
-close（response writer 无公开 close，由底层 socket 断开或引擎 writeTimeout 完成）
-finally deregister
+pull 模式将当前 frame 切成有界 slice，复制到 provider destination，不克隆整帧。返回最后一个 slice 后仍保留完整 in-flight frame/byte 额度；下一次非空 read 开始才确认前次网络写完并归还额度。空 read 不推进状态、不确认 frame、不代表 EOF。body.close 必须结清尚未确认的 partial/ackPending entry。
 
-```
-
-Writer 不可中断性（见 §0 传输层约束）：
-
-```text
-stdx HttpResponseWriter.write 不可从外部中断。
-一旦 writer task 进入 write 调用，只能等待其完成或抛异常。
-Hub 侧通过队列背压在 write 之前决策，不依赖中断进行中的 write。
-writer task write 异常后从 Hub deregister 并退出循环。
-```
+上述确认规则依赖 provider 在 H1 完成上次同步写、H2 完成 DATA write ticket 后才再次 read。依赖改变时必须重新验证，不能提前归还额度或引入第二个无界缓冲。
 
 ### 5. 有界队列
 
@@ -1140,9 +1087,7 @@ DisconnectSlowConsumer
 
 所有背压决策在 enqueue 阶段执行，不在 write 阶段执行。
 
-原因：stdx `HttpResponseWriter.write` 不可中断（见 §0 传输层约束）。
-一旦帧进入 write 调用，无法从外部取消该调用。
-因此慢消费者检测必须在帧入队前完成。
+预算同时覆盖 queued 和 in-flight frames/bytes。慢消费者决策在 enqueue 阶段完成，广播不等待 socket；超额断开触发 request-scoped abort，逻辑移除与实际 transport release 分开计数。
 
 广播路径必须非阻塞或有明确超时。
 
@@ -1245,29 +1190,22 @@ closeGracefully(deadline)
 优雅关闭：
 
 ```text
-停止接收新连接
-→ endpoint 标记 closing
-→ 可选 drain 队列
-→ deadline 到达后标记全部 connection 为 dead
-→ 停止向所有 connection enqueue
-→ 关闭 HTTP server（触发底层 socket 断开）
-→ writer task 在 socket 断开后 write 抛异常退出
-→ deregister
-→ 清空 registry
+关闭所有 endpoint/Hub admission gate
+→ 沿用一个 MonoTime 截止时刻 drain 全部队列
+→ 正常 drain 取得 GracefulDrainComplete，不调用 abort
+→ 始终调用 Wirestack shutdown，使用同一绝对 Deadline
+→ provider 输出 H1 terminal chunk / H2 END_STREAM
+→ deadline 到期升级 force-stop，显式关闭活跃 body registry 剩余条目
+→ body close 结清 in-flight 并释放 reservation
 ```
 
 关闭必须幂等。
 
-stdx 限制（见 §0 传输层约束）：
+`closeNow()` 与 graceful shutdown 分别取得一次性 transport claim；force 必须能中断正在等待的 graceful。关闭回调只请求逻辑 cancel/wakeup，不执行等待型 body.close。所有 network/abort/close/Future join 在 SSE mutex 外执行。
 
-```text
-closeNow 无法主动中断正在 write 的 writer task。
-closeNow 做的是：停止 enqueue + 关闭 HTTP server。
-底层 socket 断开后 write 抛异常，writer task 才能退出。
-如果 writer task 阻塞在 write 中且 socket 未断（TCP 窗口为零但连接活跃），
-writer task 协程会挂起直到 TCP 超时或客户端断连。
-这是 stdx 的限制，不是 sse4cj 的设计选择。
-```
+每 server 的活跃 body registry 必须包含已经从 Hub 逐出的 body，直到实际 body.close 的释放路径移除。application body.close（特别是 H2）不等价于结束帧已经上网，因此不能用 registry 空替代 Wirestack shutdown。
+
+`activeAtReturn > 0` 只表明 provider task 仍在协作退出，不等价于 SSE 队列泄漏。不得声称 close 会同步 join 任意阻塞的 admission callback。
 
 ---
 
@@ -1840,7 +1778,7 @@ cjcov
 连续执行，不等待确认：
 
 1. 创建全新仓颉项目。
-2. 审计 SDK/stdx API。
+2. 审计 SDK/Wirestack API。
 3. 确定公开 API 和错误模型。
 4. 编写 reference decoder。
 5. 编写协议 fixtures。
@@ -1886,7 +1824,7 @@ cjcov
 - 在广播线程写网络；
 - 在持锁状态下执行 callback；
 - 在鉴权前注册连接；
-- 硬编码 `Transfer-Encoding`；
+- 在 SSE core 手写 HTTP framing（Wirestack H1 adapter 的 chunked header 声明除外）；
 - 硬编码 `Connection: keep-alive`；
 - 测试访问公网；
 - 只写示例而没有断言；
@@ -1935,12 +1873,12 @@ cjcov
 34. 有真实 benchmark 数据。
 35. 文档完整。
 36. 没有将未验证能力声称为已支持。
-37. stdx writeTimeout 限制已在文档中声明（见 §0 传输层约束）。
-38. 背压决策在 enqueue 阶段完成，不依赖中断进行中的 write。
+37. Wirestack header-arrival deadline/peer-IP admission 缺失及实际支持环境已明确记录。
+38. 背压决策在 enqueue 阶段完成，in-flight 预算直到真实确认或 body.close 才释放。
 39. 最大并发连接数可配置，防止协程累积。
 40. writer task 阻塞时 Hub 侧正确标记 dead connection 并从 fan-out 移除。
 
-如果由于当前 stdx API 限制无法完成某项：
+如果由于当前 SDK/Wirestack API 限制无法完成某项：
 
 - 继续完成其他全部内容；
 - 建立 transport abstraction；
@@ -1979,7 +1917,7 @@ cjcov
 ## B. Toolchain
 - cjc
 - cjpm
-- stdx
+- Wirestack 与原生 TLS/resolver 构建
 - OS
 - 已验证协议
 
@@ -2021,8 +1959,8 @@ cjcov
 - cancellation
 - slow consumer
 - memory bounds
-- stdx writeTimeout 限制（不可靠的慢消费者触发器，误杀健康连接）
-- writer task 不可中断性（enqueue 阶段背压，无法中断进行中的 write）
+- request-scoped abort 与 H2 sibling 隔离
+- queued/in-flight 延迟确认与实际 body 生命周期
 - 最大并发连接数限制
 
 ## H. Security
@@ -2036,11 +1974,10 @@ cjcov
 - 每个文件及作用
 
 ## J. Remaining Limitations
-- stdx `HttpResponseWriter` 无公开 close/abort/interrupt API
-- writer task 阻塞在 write 中时无法主动 kill 协程
-- writeTimeout 是 stdx bug（一次性定时器，不重置），不可作为可靠触发器
-- HTTP/2 路径无 writeTimer 兜底
-- 协程释放依赖底层 socket 断开
+- 无有限 server header-arrival deadline 和 peer-IP admission 字段
+- 默认 server 无公开 TLS 配置接口，包内 TLS 注入用于验证
+- 关闭不保证同步 join 任意用户 admission callback
+- 支持声明仅限实际验证的 SDK、native provider 和平台
 - 只写真实限制
 
 ## K. Verification

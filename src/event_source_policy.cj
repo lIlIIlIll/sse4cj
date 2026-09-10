@@ -193,7 +193,7 @@ public open class EventSourceCallbacks {
 public class EventSourceConfig {
     public let url: String
     public let headers: Array<SseHeader>
-    public let connectTimeoutMillis: Int64
+    public let openTimeoutMillis: Int64
     public let readTimeoutMillis: Int64
     public let readBufferSize: Int64
     public let decoderLimits: SseDecoderLimits
@@ -203,7 +203,7 @@ public class EventSourceConfig {
     public init(
         url: String,
         headers!: Array<SseHeader> = [],
-        connectTimeoutMillis!: Int64 = 10_000,
+        openTimeoutMillis!: Int64 = 10_000,
         readTimeoutMillis!: Int64 = 120_000,
         readBufferSize!: Int64 = 16 * 1024,
         decoderLimits!: SseDecoderLimits = SseDecoderLimits.DEFAULTS,
@@ -214,13 +214,13 @@ public class EventSourceConfig {
         SseHttpRequest(
             url,
             headers: headers,
-            connectTimeoutMillis: connectTimeoutMillis,
+            openTimeoutMillis: openTimeoutMillis,
             readTimeoutMillis: readTimeoutMillis
         )
         SseStreamReaderConfig(readBufferSize: readBufferSize, decoderLimits: decoderLimits)
         this.url = url
         this.headers = headers.clone()
-        this.connectTimeoutMillis = connectTimeoutMillis
+        this.openTimeoutMillis = openTimeoutMillis
         this.readTimeoutMillis = readTimeoutMillis
         this.readBufferSize = readBufferSize
         this.decoderLimits = decoderLimits

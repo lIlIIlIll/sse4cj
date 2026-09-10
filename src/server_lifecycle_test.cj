@@ -2,7 +2,6 @@ package sse4cj
 
 import std.sync.*
 import std.time.*
-import stdx.net.http.*
 
 private class LifecycleBlockingWriter <: SseConnectionWriter {
     private let mutex = Mutex()
@@ -20,13 +19,16 @@ private class LifecycleBlockingWriter <: SseConnectionWriter {
             condition.notifyAll()
             while (!released) {
                 let remaining = deadline - MonoTime.now()
-                if (remaining <= Duration.Zero) { break }
+                if (remaining <= Duration.Zero) {
+                    break
+                }
                 condition.wait(timeout: remaining)
             }
         }
     }
 
     public func flush(): Unit {}
+
     public func close(): Unit {
         synchronized(mutex) {
             condition.notifyAll()
@@ -57,20 +59,43 @@ private class LifecycleBlockingWriter <: SseConnectionWriter {
 
 private class LifecycleServerTransport <: SseServerTransport {
     private let mutex = Mutex()
-    private let changed = synchronized(mutex) { mutex.condition() }
+    private let changed = synchronized(mutex) {
+        mutex.condition()
+    }
+    private let blockGraceful: Bool
+    private let failRegister: Bool
     private var afterBind: Option<() -> Unit> = None<() -> Unit>
     private var serveEntered = false
     private var closeCalls: Int64 = 0
+    private var gracefulCalls: Int64 = 0
+    private var gracefulCompleted: Int64 = 0
 
-    public prop port: UInt16 { get() { 42424 } }
+    init(blockGraceful!: Bool = false, failRegister!: Bool = false) {
+        this.blockGraceful = blockGraceful
+        this.failRegister = failRegister
+    }
 
-    public func register(path: String, handler: (HttpContext) -> Unit): Unit {
+    public prop port: UInt16 {
+        get() {
+            42424
+        }
+    }
+
+    public func register(
+        path: String,
+        handler: (SseServerRequest, () -> Unit) -> SseServerTransportResponse
+    ): Unit {
         let _ = path
         let _ = handler
+        if (failRegister) {
+            throw Exception("lifecycle register failure")
+        }
     }
 
     public func serve(): Unit {
-        match (synchronized(mutex) { afterBind }) {
+        match (synchronized(mutex) {
+            afterBind
+        }) {
             case Some(action) => action()
             case None => ()
         }
@@ -78,11 +103,29 @@ private class LifecycleServerTransport <: SseServerTransport {
         synchronized(mutex) {
             serveEntered = true
             changed.notifyAll()
-            while (closeCalls == 0) {
+            while (closeCalls == 0 && gracefulCompleted == 0) {
                 let remaining = deadline - MonoTime.now()
-                if (remaining <= Duration.Zero) { break }
+                if (remaining <= Duration.Zero) {
+                    break
+                }
                 changed.wait(timeout: remaining)
             }
+        }
+    }
+
+    public func closeGracefully(deadline: MonoTime): Unit {
+        synchronized(mutex) {
+            gracefulCalls++
+            changed.notifyAll()
+            while (blockGraceful && closeCalls == 0) {
+                let remaining = deadline - MonoTime.now()
+                if (remaining <= Duration.Zero) {
+                    break
+                }
+                changed.wait(timeout: remaining)
+            }
+            gracefulCompleted++
+            changed.notifyAll()
         }
     }
 
@@ -93,32 +136,74 @@ private class LifecycleServerTransport <: SseServerTransport {
         }
     }
 
-    func setAfterBind(action: () -> Unit): Unit { synchronized(mutex) { afterBind = Some(action) } }
-
-    func awaitServe(timeoutMillis!: Int64 = 1000): Bool {
-        let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
+    func setAfterBind(action: () -> Unit): Unit {
         synchronized(mutex) {
-            while (!serveEntered) {
-                let remaining = deadline - MonoTime.now()
-                if (remaining <= Duration.Zero) { break }
-                changed.wait(timeout: remaining)
-            }
-            serveEntered
+            afterBind = Some(action)
         }
     }
 
-    prop closeCount: Int64 { get() { synchronized(mutex) { closeCalls } } }
+    func awaitServe(timeoutMillis!: Int64 = 1000): Bool {
+        awaitFlag(timeoutMillis, {=> serveEntered})
+    }
+
+    func awaitGraceful(timeoutMillis!: Int64 = 1000): Bool {
+        awaitFlag(timeoutMillis, {=> gracefulCalls > 0})
+    }
+
+    private func awaitFlag(timeoutMillis: Int64, predicate: () -> Bool): Bool {
+        let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
+        synchronized(mutex) {
+            while (!predicate()) {
+                let remaining = deadline - MonoTime.now()
+                if (remaining <= Duration.Zero) {
+                    break
+                }
+                changed.wait(timeout: remaining)
+            }
+            predicate()
+        }
+    }
+
+    prop closeCount: Int64 {
+        get() {
+            synchronized(mutex) {
+                closeCalls
+            }
+        }
+    }
+    prop gracefulCount: Int64 {
+        get() {
+            synchronized(mutex) {
+                gracefulCalls
+            }
+        }
+    }
 }
 
 private class LifecycleServerTransportFactory <: SseServerTransportFactory {
-    let transport = LifecycleServerTransport()
+    let transport: LifecycleServerTransport
     private let blockBuild: Bool
+    private let failBuild: Bool
     private let mutex = Mutex()
-    private let changed = synchronized(mutex) { mutex.condition() }
+    private let changed = synchronized(mutex) {
+        mutex.condition()
+    }
     private var buildEntered = false
     private var buildReleased = false
 
-    init(blockBuild!: Bool = false) { this.blockBuild = blockBuild }
+    init(
+        blockBuild!: Bool = false,
+        blockGraceful!: Bool = false,
+        failBuild!: Bool = false,
+        failRegister!: Bool = false
+    ) {
+        this.blockBuild = blockBuild
+        this.failBuild = failBuild
+        transport = LifecycleServerTransport(
+            blockGraceful: blockGraceful,
+            failRegister: failRegister
+        )
+    }
 
     public func build(_config: SseServerConfig, afterBind: () -> Unit): SseServerTransport {
         let _ = _config
@@ -130,10 +215,15 @@ private class LifecycleServerTransportFactory <: SseServerTransportFactory {
                 changed.notifyAll()
                 while (!buildReleased) {
                     let remaining = deadline - MonoTime.now()
-                    if (remaining <= Duration.Zero) { break }
+                    if (remaining <= Duration.Zero) {
+                        break
+                    }
                     changed.wait(timeout: remaining)
                 }
             }
+        }
+        if (failBuild) {
+            throw Exception("lifecycle build failure")
         }
         transport
     }
@@ -143,7 +233,9 @@ private class LifecycleServerTransportFactory <: SseServerTransportFactory {
         synchronized(mutex) {
             while (!buildEntered) {
                 let remaining = deadline - MonoTime.now()
-                if (remaining <= Duration.Zero) { break }
+                if (remaining <= Duration.Zero) {
+                    break
+                }
                 changed.wait(timeout: remaining)
             }
             buildEntered
@@ -158,7 +250,20 @@ private class LifecycleServerTransportFactory <: SseServerTransportFactory {
     }
 }
 
-private func awaitLifecycleEndpointClosing(endpoint: SseEndpoint, timeoutMillis!: Int64 = 1000): Bool {
+private func lifecycleEndpoint(path: String): SseEndpoint {
+    SseEndpoint(
+        path,
+        config: SseEndpointConfig(
+            connection: SseConnectionConfig(transportAbortCapability: SseTransportAbortCapability.Immediate),
+            initialComment: None<String>
+        )
+    )
+}
+
+private func awaitLifecycleEndpointClosing(
+    endpoint: SseEndpoint,
+    timeoutMillis!: Int64 = 1000
+): Bool {
     let deadline = MonoTime.now() + Duration.millisecond * timeoutMillis
     synchronized(endpoint.closeMutex) {
         while (!endpoint.isClosing) {
@@ -172,15 +277,32 @@ private func awaitLifecycleEndpointClosing(endpoint: SseEndpoint, timeoutMillis!
     }
 }
 
-private func attachBlockedLifecycleConnection(endpoint: SseEndpoint, id: String): (SseConnection, 
-    LifecycleBlockingWriter) {
-    let connection = SseConnection(id, config: endpoint.config.connection)
+private func attachBlockedLifecycleConnection(
+    endpoint: SseEndpoint,
+    id: String
+): (SseConnection, LifecycleBlockingWriter) {
+    let connection = SseConnection(
+        id,
+        config: SseConnectionConfig(transportAbortCapability: SseTransportAbortCapability.ServerWideOnly)
+    )
     endpoint.attachConnection(connection, "")
     connection.send(SseFrame(data: Some("blocked")))
     let writer = LifecycleBlockingWriter()
     connection.start(writer)
     @Assert(writer.awaitEntered())
     (connection, writer)
+}
+
+private func lifecycleAwaitBoundFailed(server: SseServer): Bool {
+    try {
+        server.awaitBound(timeoutMillis: 100)
+        false
+    } catch (error: SseException) {
+        match (error.kind) {
+            case SseErrorKind.TransportFailure => true
+            case _ => false
+        }
+    }
 }
 
 @Test
@@ -197,7 +319,27 @@ func serverCloseWinningBeforeStartPublishClosesLoserTransportOnce() {
 }
 
 @Test
-func serverGracefulTransportCloseIsStrongAndIdempotent() {
+func serverBuildFailureWakesAwaitBound() {
+    let factory = LifecycleServerTransportFactory(failBuild: true)
+    let server = SseServer()
+    server.transportFactory = factory
+    server.start()
+    @Assert(lifecycleAwaitBoundFailed(server))
+}
+
+@Test
+func serverRegisterFailureClosesBuiltTransportAndWakesAwaitBound() {
+    let factory = LifecycleServerTransportFactory(failRegister: true)
+    let server = SseServer()
+    server.transportFactory = factory
+    server.register(lifecycleEndpoint("/lifecycle-register-failure"))
+    server.start()
+    @Assert(lifecycleAwaitBoundFailed(server))
+    @Assert(factory.transport.closeCount, 1)
+}
+
+@Test
+func serverGracefulAndForceTransportCloseAreIndependentAndIdempotent() {
     let factory = LifecycleServerTransportFactory()
     let server = SseServer()
     server.transportFactory = factory
@@ -205,38 +347,46 @@ func serverGracefulTransportCloseIsStrongAndIdempotent() {
     @Assert(factory.transport.awaitServe())
 
     server.closeGracefully(1000)
-    @Assert(factory.transport.closeCount, 1)
+    @Assert(factory.transport.gracefulCount, 1)
+    @Assert(factory.transport.closeCount, 0)
+    server.closeGracefully(1000)
+    @Assert(factory.transport.gracefulCount, 1)
+
+    server.closeNow()
     server.closeNow()
     @Assert(factory.transport.closeCount, 1)
 }
 
 @Test
-func serverConcurrentGracefulUpgradeClosesTransportOnce() {
-    let endpoint = SseEndpoint("/lifecycle-fake-upgrade",
-        config: SseEndpointConfig(initialComment: None<String>))
-    let (connection, writer) = attachBlockedLifecycleConnection(endpoint, "lifecycle-fake-upgrade-blocked")
-    let factory = LifecycleServerTransportFactory()
+func serverForceCloseInterruptsPendingGracefulTransportShutdown() {
+    let factory = LifecycleServerTransportFactory(blockGraceful: true)
     let server = SseServer()
     server.transportFactory = factory
-    server.register(endpoint)
     server.start()
     @Assert(factory.transport.awaitServe())
 
     let graceful: Future<Unit> = spawn {=> server.closeGracefully(5000)}
-    @Assert(awaitLifecycleEndpointClosing(endpoint))
+    @Assert(factory.transport.awaitGraceful())
+    @Assert(graceful.tryGet().isNone())
+
     server.closeNow()
     graceful.get(Duration.second)
+    @Assert(factory.transport.gracefulCount, 1)
     @Assert(factory.transport.closeCount, 1)
-    writer.release()
-    @Assert(connection.awaitClosed(1000))
 }
 
 @Test
 func serverGracefulCloseClosesEveryAdmissionGateBeforeDrain() {
-    let first = SseEndpoint("/lifecycle-first", config: SseEndpointConfig(initialComment: None<String>))
-    let second = SseEndpoint("/lifecycle-second", config: SseEndpointConfig(initialComment: None<String>))
-    let (firstConnection, firstWriter) = attachBlockedLifecycleConnection(first, "lifecycle-first-blocked")
-    let (secondConnection, secondWriter) = attachBlockedLifecycleConnection(second, "lifecycle-second-blocked")
+    let first = lifecycleEndpoint("/lifecycle-first")
+    let second = lifecycleEndpoint("/lifecycle-second")
+    let (firstConnection, firstWriter) = attachBlockedLifecycleConnection(
+        first,
+        "lifecycle-first-blocked"
+    )
+    let (secondConnection, secondWriter) = attachBlockedLifecycleConnection(
+        second,
+        "lifecycle-second-blocked"
+    )
     let server = SseServer()
     server.register(first)
     server.register(second)
@@ -246,7 +396,7 @@ func serverGracefulCloseClosesEveryAdmissionGateBeforeDrain() {
     @Assert(awaitLifecycleEndpointClosing(second))
     @Assert(graceful.tryGet().isNone())
 
-    let request = SseServerRequest("GET", "local", "", {_: String => None<String>})
+    let request = SseServerRequest("GET", "", {_: String => None<String>})
     let decision = second.decide(request)
     @Assert(!decision.accepted)
     @Assert(decision.rejectStatus, 503)
@@ -259,9 +409,12 @@ func serverGracefulCloseClosesEveryAdmissionGateBeforeDrain() {
 }
 
 @Test
-func serverCloseNowUpgradesConcurrentGracefulClose() {
-    let endpoint = SseEndpoint("/lifecycle-upgrade", config: SseEndpointConfig(initialComment: None<String>))
-    let (connection, writer) = attachBlockedLifecycleConnection(endpoint, "lifecycle-upgrade-blocked")
+func serverCloseNowUpgradesConcurrentGracefulEndpointDrain() {
+    let endpoint = lifecycleEndpoint("/lifecycle-upgrade")
+    let (connection, writer) = attachBlockedLifecycleConnection(
+        endpoint,
+        "lifecycle-upgrade-blocked"
+    )
     let server = SseServer()
     server.register(endpoint)
 
@@ -285,7 +438,6 @@ func serverCloseNowUpgradesConcurrentGracefulClose() {
     }
     @Assert(startRejected.get(Duration.second))
 
-    // Both public terminal operations remain idempotent after force upgrade.
     server.closeNow()
     server.closeGracefully(1_000)
 
@@ -295,15 +447,16 @@ func serverCloseNowUpgradesConcurrentGracefulClose() {
 
 @Test
 func serverRejectsRegistrationAfterStartBoundary() {
+    let factory = LifecycleServerTransportFactory()
     let server = SseServer()
-    server.register(SseEndpoint("/lifecycle-started", config: SseEndpointConfig(initialComment: None<String>)))
+    server.transportFactory = factory
+    server.register(lifecycleEndpoint("/lifecycle-started"))
     server.start()
-    server.awaitBound()
+    @Assert(factory.transport.awaitServe())
 
     let registerRejected: Future<Bool> = spawn {
         => try {
-            server.register(SseEndpoint("/lifecycle-too-late",
-                config: SseEndpointConfig(initialComment: None<String>)))
+            server.register(lifecycleEndpoint("/lifecycle-too-late"))
             false
         } catch (_: SseException) {
             true
