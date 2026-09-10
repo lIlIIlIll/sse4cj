@@ -2,7 +2,7 @@
 
 All notable changes to `sse4cj` are documented here.
 
-## Unreleased
+## 0.1.0 - 2026-09-10
 
 ### Wirestack network cutover (breaking)
 
