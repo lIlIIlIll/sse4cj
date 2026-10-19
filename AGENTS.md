@@ -125,3 +125,17 @@ Do not hide warnings globally. If a tool is unavailable, record that fact instea
 ## Completion
 
 Do not report `COMPLETE` until all completion conditions in `SPEC.md` hold, including real tests, real release benchmarks, profiler-backed optimization, documentation, resource/cancellation guarantees, and verified SDK-dependent transports. Otherwise report `INCOMPLETE` with precise blockers and continue completing all independent work that remains possible.
+
+## Code Review Rules
+
+- Codex 审查必须以本仓库的 `SPEC.md`、当前 SDK 实测能力和源码为准。阻塞性意见应给出能到达的调用序列、确切违反的 SSE/资源/取消契约以及测试反例；不要把偏好或未证实推测伪装成缺陷。
+- Decoder/encoder 修改时，对同一根因一次检查 LF/CR/CRLF 的跨 chunk 边界、UTF-8 拆分、开头 BOM、空字段与缺失字段、Last-Event-ID、EOF、NUL/换行注入、超限。核对参考 decoder 与优化 decoder 的等价性。
+- Client/reconnect 修改时，覆盖正常 EOF 与可重连失败、HTTP 204、deadline、取消、close 幂等、无锁用户 callback、重连风暴；不能把完成和取消合并为一个表面成功状态。
+- Server/Hub 修改时检查单 writer、队列 frame/byte 预算、in-flight accounting、replay-live 顺序、backpressure、资源清理、慢消费与锁外 I/O。无需将与本 PR 无关的所有组合列为阻塞。
+- 发现同根因的正反、对称、空值和竞争情形应尽量一次检查并合并报告；可见历史 Review Thread 时先去重，复审聚焦修复及受影响调用链，同时保留新发现的真实阻塞缺陷。
+
+## Review 反馈处理与收敛
+
+- 按根因与不变量汇总 Review，核对现有 `SPEC.md` 与生产路径，再集中修复并补差分/参数化、可控时钟/同步测试；不要对每条建议独立 Push。
+- 对仍阻塞、已修复、附证据不采纳、范围外独立改进分别记录证据；只声称确实运行的编译、fixture、真实网络/平台与 CI 结果。
+- 检查最后一个 HEAD 的真实 Codex Review 完成证据；`AGENTS.md` 不会自动改变 Review Trigger。仍遵守原有 `SPEC.md` 的 COMPLETE/INCOMPLETE 要求，不因固定轮数或 Thread 清零降低门禁。
